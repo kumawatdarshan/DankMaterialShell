@@ -90,7 +90,7 @@ Item {
         ClipboardHeader {
             id: header
             width: parent.width
-            recentsCount: modal.unpinnedEntries.length
+            recentsCount: modal.totalCount
             savedCount: modal.pinnedEntries.length
             showKeyboardHints: modal.showKeyboardHints
             activeTab: modal.activeTab
@@ -125,7 +125,6 @@ Item {
                     ClipboardService.selectedIndex = 0;
                     ClipboardService.keyboardNavigationActive = true;
                     Qt.callLater(function () {
-                        clipboardListView.positionViewAtBeginning();
                         savedListView.positionViewAtBeginning();
                     });
                 }
@@ -231,12 +230,43 @@ Item {
                 }
             }
 
+            Connections {
+                target: clipboardContent.modal
+                function onUnpinnedEntriesChanged() {
+                    if (clipboardContent.modal?.selectedIndex === 0) {
+                        clipboardListView.positionViewAtBeginning();
+                    }
+                }
+            }
+
+            onContentYChanged: {
+                if (modal.searchLoading || !modal.searchHasMore) {
+                    return;
+                }
+                if (contentHeight - contentY - height < 500) {
+                    ClipboardService.loadMore();
+                }
+            }
+
+            footer: Item {
+                width: clipboardListView.width
+                height: (modal.searchLoading || modal.searchHasMore) ? 28 : 0
+                visible: modal.searchLoading || modal.searchHasMore
+
+                StyledText {
+                    anchors.centerIn: parent
+                    text: modal.searchLoading ? I18n.tr("Loading...") : I18n.tr("Showing %1 of %2").arg(clipboardContent.modal.unpinnedEntries.length).arg(clipboardContent.modal.totalCount)
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceVariantText
+                }
+            }
+
             StyledText {
                 text: clipboardContent.modal.clipboardAvailable ? I18n.tr("No recent clipboard entries found") : I18n.tr("Connecting to clipboard service...")
                 anchors.centerIn: parent
                 font.pixelSize: Theme.fontSizeMedium
                 color: Theme.surfaceVariantText
-                visible: clipboardContent.modal.unpinnedEntries.length === 0
+                visible: clipboardContent.modal.unpinnedEntries.length === 0 && !clipboardContent.modal.searchLoading
             }
 
             delegate: ClipboardEntry {

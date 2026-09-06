@@ -81,3 +81,24 @@ func FlatpakInstallationDir(name string) (string, error) {
 
 	return location, nil
 }
+
+func InstalledFlatpaks() []string {
+	if !FlatpakInPath() {
+		return nil
+	}
+
+	out, err := exec.Command("flatpak", "list", "--app", "--columns=application").Output()
+	if err != nil {
+		return nil
+	}
+
+	var apps []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		app := strings.TrimSpace(line)
+		if app == "" {
+			continue
+		}
+		apps = append(apps, app)
+	}
+	return apps
+}

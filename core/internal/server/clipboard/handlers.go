@@ -23,6 +23,8 @@ func HandleRequest(conn *models.Conn, req models.Request, m *Manager) {
 		handleDeleteEntry(conn, req, m)
 	case "clipboard.deleteEntries":
 		handleDeleteEntries(conn, req, m)
+	case "clipboard.deleteMatching":
+		handleDeleteMatching(conn, req, m)
 	case "clipboard.clearHistory":
 		handleClearHistory(conn, req, m)
 	case "clipboard.copy":
@@ -172,6 +174,19 @@ func toEntryID(value any) (uint64, error) {
 	}
 }
 
+func handleDeleteMatching(conn *models.Conn, req models.Request, m *Manager) {
+	query := params.StringOpt(req.Params, "query", "")
+	entryType := params.StringOpt(req.Params, "entryType", "")
+
+	deleted, err := m.DeleteMatching(query, entryType)
+	if err != nil {
+		models.RespondError(conn, req.ID, err.Error())
+		return
+	}
+
+	models.Respond(conn, req.ID, map[string]int{"deleted": deleted})
+}
+
 func handleClearHistory(conn *models.Conn, req models.Request, m *Manager) {
 	m.ClearHistory()
 	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "history cleared"})
@@ -296,20 +311,28 @@ func handleSubscribe(conn *models.Conn, req models.Request, m *Manager) {
 
 func handleSearch(conn *models.Conn, req models.Request, m *Manager) {
 	p := SearchParams{
-		Query:    params.StringOpt(req.Params, "query", ""),
-		MimeType: params.StringOpt(req.Params, "mimeType", ""),
-		Limit:    params.IntOpt(req.Params, "limit", 50),
-		Offset:   params.IntOpt(req.Params, "offset", 0),
+		Query:     params.StringOpt(req.Params, "query", ""),
+		MimeType:  params.StringOpt(req.Params, "mimeType", ""),
+		EntryType: params.StringOpt(req.Params, "entryType", ""),
+		Limit:     params.IntOpt(req.Params, "limit", 50),
+		Offset:    params.IntOpt(req.Params, "offset", 0),
 	}
 
 	if img, ok := models.Get[bool](req, "isImage"); ok {
 		p.IsImage = &img
 	}
-	if b, ok := models.Get[float64](req, "before"); ok {
+	if pinned, ok := models.Get[bool](req, "pinned"); ok {
+		p.Pinned = &pinned
+	}
+	if beforeID := params.IntOpt(req.Params, "beforeId", 0); beforeID > 0 {
+		v := uint64(beforeID)
+		p.BeforeID = &v
+	}
+	if b, err := params.Int(req.Params, "before"); err == nil {
 		v := int64(b)
 		p.Before = &v
 	}
-	if a, ok := models.Get[float64](req, "after"); ok {
+	if a, err := params.Int(req.Params, "after"); err == nil {
 		v := int64(a)
 		p.After = &v
 	}
@@ -324,24 +347,12 @@ func handleGetConfig(conn *models.Conn, req models.Request, m *Manager) {
 func handleSetConfig(conn *models.Conn, req models.Request, m *Manager) {
 	cfg := m.GetConfig()
 
-	if v, ok := models.Get[float64](req, "maxHistory"); ok {
-		cfg.MaxHistory = int(v)
-	}
-	if v, ok := models.Get[float64](req, "maxEntrySize"); ok {
-		cfg.MaxEntrySize = int64(v)
-	}
-	if v, ok := models.Get[float64](req, "autoClearDays"); ok {
-		cfg.AutoClearDays = int(v)
-	}
-	if v, ok := models.Get[bool](req, "clearAtStartup"); ok {
-		cfg.ClearAtStartup = v
-	}
-	if v, ok := models.Get[bool](req, "disabled"); ok {
-		cfg.Disabled = v
-	}
-	if v, ok := models.Get[float64](req, "maxPinned"); ok {
-		cfg.MaxPinned = int(v)
-	}
+	cfg.MaxHistory = params.IntOpt(req.Params, "maxHistory", cfg.MaxHistory)
+	cfg.MaxEntrySize = int64(params.IntOpt(req.Params, "maxEntrySize", int(cfg.MaxEntrySize)))
+	cfg.AutoClearDays = params.IntOpt(req.Params, "autoClearDays", cfg.AutoClearDays)
+	cfg.ClearAtStartup = params.BoolOpt(req.Params, "clearAtStartup", cfg.ClearAtStartup)
+	cfg.Disabled = params.BoolOpt(req.Params, "disabled", cfg.Disabled)
+	cfg.MaxPinned = params.IntOpt(req.Params, "maxPinned", cfg.MaxPinned)
 
 	if err := m.SetConfig(cfg); err != nil {
 		models.RespondError(conn, req.ID, err.Error())

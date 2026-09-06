@@ -23,6 +23,8 @@ FocusScope {
     readonly property bool clipboardAvailable: ClipboardService.clipboardAvailable
     readonly property bool pasteAvailable: ClipboardService.pasteAvailable
     readonly property int totalCount: ClipboardService.totalCount
+    readonly property bool searchLoading: ClipboardService.isLoading
+    readonly property bool searchHasMore: ClipboardService.hasMore
     readonly property var clipboardEntries: ClipboardService.clipboardEntries
     readonly property var pinnedEntries: ClipboardService.pinnedEntries
     readonly property int pinnedCount: ClipboardService.pinnedCount
@@ -148,10 +150,10 @@ FocusScope {
             // The list is filtered, so clear what it shows and leave the modal
             // open on the filter the user is working through. A filter that
             // matches nothing must never fall back to clearing everything.
-            if (unpinnedEntries.length === 0) {
+            if (totalCount === 0) {
                 return;
             }
-            clearConfirmDialog.show(I18n.tr("Clear History?"), I18n.tr("This will delete the %1 entries matching the current filter. Pinned entries are kept.", "clipboard modal: clear confirmation while a search filter is active, %1 is the number of matching entries").arg(unpinnedEntries.length), function () {
+            clearConfirmDialog.show(I18n.tr("Clear History?"), I18n.tr("This will delete the %1 entries matching the current filter. Pinned entries are kept.", "clipboard modal: clear confirmation while a search filter is active, %1 is the number of matching entries").arg(totalCount), function () {
                 clearFiltered();
             }, function () {});
             return;

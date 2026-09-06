@@ -11,10 +11,14 @@ import (
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wlcontext"
+	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
 	wlclient "github.com/AvengeMedia/dankgo/wayland/client"
 )
 
-const largeEntryBytes = 1 << 20
+const (
+	largeEntryBytes = 1 << 20
+	bucketName      = "clipboard"
+)
 
 type Config struct {
 	MaxHistory     int   `json:"maxHistory"`
@@ -35,23 +39,14 @@ func DefaultConfig() Config {
 	}
 }
 
-func getConfigPath() (string, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(configDir, "DankMaterialShell", "clsettings.json"), nil
+func getConfigPath() string {
+	return filepath.Join(utils.XDGConfigHome(), "DankMaterialShell", "clsettings.json")
 }
 
 func LoadConfig() Config {
 	cfg := DefaultConfig()
 
-	path, err := getConfigPath()
-	if err != nil {
-		return cfg
-	}
-
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(getConfigPath())
 	if err != nil {
 		return cfg
 	}
@@ -63,10 +58,7 @@ func LoadConfig() Config {
 }
 
 func SaveConfig(cfg Config) error {
-	path, err := getConfigPath()
-	if err != nil {
-		return err
-	}
+	path := getConfigPath()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -83,11 +75,18 @@ func SaveConfig(cfg Config) error {
 type SearchParams struct {
 	Query    string `json:"query"`
 	MimeType string `json:"mimeType"`
-	IsImage  *bool  `json:"isImage"`
-	Limit    int    `json:"limit"`
-	Offset   int    `json:"offset"`
-	Before   *int64 `json:"before"`
-	After    *int64 `json:"after"`
+	// EntryType mirrors the QML clipboard type filter: "all", "text",
+	// "long_text" or "image". Empty means "all".
+	EntryType string `json:"entryType"`
+	IsImage   *bool  `json:"isImage"`
+	// Pinned filters by pin state. Nil means both, true means pinned only,
+	// false means unpinned only.
+	Pinned *bool  `json:"pinned"`
+	Limit    int     `json:"limit"`
+	Offset   int     `json:"offset"`
+	BeforeID *uint64 `json:"beforeId"`
+	Before   *int64  `json:"before"`
+	After    *int64  `json:"after"`
 }
 
 type SearchResult struct {
@@ -114,6 +113,12 @@ type State struct {
 	Enabled bool    `json:"enabled"`
 	History []Entry `json:"history"`
 	Current *Entry  `json:"current,omitempty"`
+	// TotalCount is the number of unpinned entries in history. History
+	// itself is capped to the newest head so subscribers never receive
+	// the full list at large scales.
+	TotalCount int `json:"totalCount"`
+	// PinnedCount is the number of pinned entries.
+	PinnedCount int `json:"pinnedCount"`
 }
 
 type Manager struct {
@@ -149,6 +154,10 @@ type Manager struct {
 
 	state      *State
 	stateMutex sync.RWMutex
+
+	pinnedCache   []Entry
+	unpinnedCount int
+	cacheMutex    sync.RWMutex
 
 	subscribers map[string]chan State
 	subMutex    sync.RWMutex

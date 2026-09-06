@@ -19,12 +19,16 @@ Singleton {
 
     readonly property var terminalAppIds: ["kitty", "foot", "footclient", "alacritty", "st", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "ghostty", "org.kde.konsole", "konsole", "org.gnome.terminal", "gnome-terminal-server", "org.gnome.console", "kgx", "com.gexperts.tilix", "tilix", "terminator", "xfce4-terminal", "lxterminal", "deepin-terminal", "io.elementary.terminal", "rio", "contour", "wayst", "urxvt", "rxvt"]
 
-    property var internalEntries: []
     property var clipboardEntries: []
     property var unpinnedEntries: []
     property var pinnedEntries: []
+    property var rawPinnedEntries: []
     property int pinnedCount: 0
+    // Server-side total for the current recents query. unpinnedEntries holds
+    // only the loaded page(s); use this for counts.
     property int totalCount: 0
+    property bool isLoading: false
+    property bool hasMore: false
     property string searchText: ""
     property string activeFilter: "all"
     readonly property bool filterActive: searchText.trim().length > 0 || activeFilter !== "all"
@@ -35,6 +39,8 @@ Singleton {
     property string _launcherCachedQuery: ""
     property var _launcherCachedEntries: []
     property int _launcherSearchSeq: 0
+    property int _searchSeq: 0
+    readonly property int pageSize: 100
 
     signal historyCopied
     signal historyCleared
@@ -84,56 +90,118 @@ Singleton {
         });
     }
 
-    function updateFilteredModel() {
+    Timer {
+        id: searchDebounce
+        interval: 150
+        onTriggered: root.requestPage(true)
+    }
+
+    function updatePinnedFiltered() {
         const query = searchText.trim().toLowerCase();
         const filterAll = activeFilter === "all";
-        const unpinned = [];
-        const pinned = [];
+        pinnedEntries = rawPinnedEntries.filter(entry => {
+            if (!filterAll && getEntryType(entry) !== activeFilter) {
+                return false;
+            }
+            if (query.length > 0 && !(entry.preview || "").toLowerCase().includes(query)) {
+                return false;
+            }
+            return true;
+        });
+        clipboardEntries = pinnedEntries.concat(unpinnedEntries);
+    }
 
-        for (let i = 0; i < internalEntries.length; i++) {
-            const entry = internalEntries[i];
-            if (!filterAll && getEntryType(entry) !== activeFilter)
-                continue;
-            if (query.length > 0 && !entry.preview.toLowerCase().includes(query))
-                continue;
-            (entry.pinned ? pinned : unpinned).push(entry);
-        }
-
-        const byIdDesc = (a, b) => b.id - a.id;
-        pinned.sort(byIdDesc);
-        unpinned.sort(byIdDesc);
-
-        pinnedEntries = pinned;
-        unpinnedEntries = unpinned;
-        clipboardEntries = pinned.concat(unpinned);
-        totalCount = clipboardEntries.length;
-
-        const activeCount = Math.max(unpinned.length, pinned.length);
-
-        if (activeCount === 0) {
-            keyboardNavigationActive = false;
-            selectedIndex = 0;
+    // Immediate client-side filter for pinned items + debounced server paging
+    // for history items.
+    function updateFilteredModel() {
+        if (!clipboardAvailable) {
             return;
         }
+        _searchSeq++;
+        updatePinnedFiltered();
+        searchDebounce.restart();
+    }
 
-        if (selectedIndex >= activeCount)
-            selectedIndex = activeCount - 1;
+    function requestPage(reset) {
+        if (!clipboardAvailable) {
+            return;
+        }
+        _searchSeq++;
+        const seq = _searchSeq;
+        if (reset) {
+            selectedIndex = 0;
+        }
+        isLoading = true;
+        const params = {
+            "query": searchText.trim(),
+            "limit": pageSize,
+            "pinned": false
+        };
+        if (!reset && unpinnedEntries.length > 0) {
+            params.beforeId = unpinnedEntries[unpinnedEntries.length - 1].id;
+        } else {
+            params.offset = 0;
+        }
+        if (activeFilter !== "all") {
+            params.entryType = activeFilter;
+        }
+        DMSService.sendRequest("clipboard.search", params, function (response) {
+            if (seq !== root._searchSeq) {
+                return;
+            }
+            root.isLoading = false;
+            if (response.error) {
+                log.warn("Clipboard search failed:", response.error);
+                return;
+            }
+            const result = response.result || {};
+            const entries = result.entries || [];
+            if (reset) {
+                root.unpinnedEntries = entries;
+                root.totalCount = result.total || 0;
+                root.selectedIndex = 0;
+                root.keyboardNavigationActive = entries.length > 0;
+            } else {
+                root.unpinnedEntries = root.unpinnedEntries.concat(entries);
+                if (root.selectedIndex >= root.unpinnedEntries.length) {
+                    root.selectedIndex = Math.max(0, root.unpinnedEntries.length - 1);
+                }
+            }
+            root.hasMore = result.hasMore === true;
+            root.clipboardEntries = root.pinnedEntries.concat(root.unpinnedEntries);
+        });
+    }
+
+    function loadMore() {
+        if (isLoading || !hasMore) {
+            return;
+        }
+        requestPage(false);
+    }
+
+    function refreshPinned() {
+        if (!clipboardAvailable) {
+            return;
+        }
+        DMSService.sendRequest("clipboard.getPinnedEntries", null, function (response) {
+            if (response.error) {
+                log.warn("Failed to get pinned entries:", response.error);
+                return;
+            }
+            const entries = response.result || [];
+            root.rawPinnedEntries = entries;
+            root.pinnedCount = entries.length;
+            root.updatePinnedFiltered();
+        });
     }
 
     function refresh() {
         if (!clipboardAvailable) {
             return;
         }
-        DMSService.sendRequest("clipboard.getHistory", null, function (response) {
-            if (response.error) {
-                log.warn("Failed to get history:", response.error);
-                return;
-            }
-            internalEntries = response.result || [];
-            pinnedEntries = internalEntries.filter(e => e.pinned);
-            pinnedCount = pinnedEntries.length;
-            updateFilteredModel();
-        });
+        searchDebounce.stop();
+        refreshPinned();
+        requestPage(true);
     }
 
     function requestLauncherSearch(query, limit) {
@@ -194,12 +262,18 @@ Singleton {
     }
 
     function reset() {
+        searchDebounce.stop();
+        _searchSeq++;
         searchText = "";
         selectedIndex = 0;
         keyboardNavigationActive = false;
-        internalEntries = [];
-        clipboardEntries = [];
         unpinnedEntries = [];
+        clipboardEntries = [];
+        pinnedEntries = [];
+        rawPinnedEntries = [];
+        totalCount = 0;
+        hasMore = false;
+        isLoading = false;
     }
 
     function copyEntry(entry, closeCallback, textOnly) {
@@ -249,10 +323,29 @@ Singleton {
     }
 
     function pasteSelected(closeCallback) {
-        if (!keyboardNavigationActive || clipboardEntries.length === 0 || selectedIndex < 0 || selectedIndex >= clipboardEntries.length) {
+        if (!keyboardNavigationActive || selectedIndex < 0) {
             return;
         }
-        pasteEntry(clipboardEntries[selectedIndex], closeCallback);
+        const entries = unpinnedEntries.length > 0 ? unpinnedEntries : pinnedEntries;
+        if (selectedIndex >= entries.length) {
+            return;
+        }
+        pasteEntry(entries[selectedIndex], closeCallback);
+    }
+
+    function removeFromPage(entry) {
+        unpinnedEntries = unpinnedEntries.filter(e => e.id !== entry.id);
+        totalCount = Math.max(0, totalCount - 1);
+        clipboardEntries = pinnedEntries.concat(unpinnedEntries);
+        if (unpinnedEntries.length === 0) {
+            keyboardNavigationActive = false;
+            selectedIndex = 0;
+        } else if (selectedIndex >= unpinnedEntries.length) {
+            selectedIndex = unpinnedEntries.length - 1;
+        }
+        if (hasMore && !isLoading && unpinnedEntries.length < pageSize) {
+            loadMore();
+        }
     }
 
     function deleteEntry(entry) {
@@ -263,16 +356,7 @@ Singleton {
                 log.warn("Failed to delete entry:", response.error);
                 return;
             }
-            internalEntries = internalEntries.filter(e => e.id !== entry.id);
-            updateFilteredModel();
-            if (clipboardEntries.length === 0) {
-                keyboardNavigationActive = false;
-                selectedIndex = 0;
-                return;
-            }
-            if (selectedIndex >= clipboardEntries.length) {
-                selectedIndex = clipboardEntries.length - 1;
-            }
+            root.removeFromPage(entry);
         });
     }
 
@@ -288,8 +372,14 @@ Singleton {
                     log.warn("Failed to delete entry:", response.error);
                     return;
                 }
-                internalEntries = internalEntries.filter(e => e.id !== entry.id);
-                updateFilteredModel();
+                root.rawPinnedEntries = root.rawPinnedEntries.filter(e => e.id !== entry.id);
+                root.pinnedCount = root.rawPinnedEntries.length;
+                root.updatePinnedFiltered();
+                if (root.pinnedEntries.length === 0) {
+                    root.selectedIndex = 0;
+                } else if (root.selectedIndex >= root.pinnedEntries.length) {
+                    root.selectedIndex = root.pinnedEntries.length - 1;
+                }
                 ToastService.showInfo(I18n.tr("Saved item deleted"));
             });
         }, function () {});
@@ -351,19 +441,22 @@ Singleton {
     }
 
     function clearFiltered() {
-        const ids = unpinnedEntries.map(entry => entry.id);
-        if (ids.length === 0) {
-            return;
+        if (totalCount === 0) {
+            return
         }
-        DMSService.sendRequest("clipboard.deleteEntries", {
-            "ids": ids
-        }, function (response) {
+        const params = {
+            "query": searchText.trim()
+        }
+        if (activeFilter !== "all") {
+            params.entryType = activeFilter
+        }
+        DMSService.sendRequest("clipboard.deleteMatching", params, function (response) {
             if (response.error) {
                 log.warn("Failed to clear filtered entries:", response.error);
                 return;
             }
-            refresh();
-            historyCleared();
+            root.refresh();
+            root.historyCleared();
         });
     }
 
@@ -385,11 +478,7 @@ Singleton {
         if (!entryHash) {
             return null;
         }
-        return internalEntries.find(entry => entry.pinned && entry.hash === entryHash) || null;
-    }
-
-    function hashedPinnedEntry(entryHash) {
-        return getPinnedEntryByHash(entryHash) !== null;
+        return rawPinnedEntries.find(e => e.hash === entryHash) || null;
     }
 
     onClipboardAvailableChanged: {
@@ -402,11 +491,23 @@ Singleton {
         target: DMSService
         enabled: root.refCount > 0
         function onClipboardStateUpdate(data) {
-            const newHistory = data.history || [];
-            internalEntries = newHistory;
-            pinnedEntries = newHistory.filter(e => e.pinned);
-            pinnedCount = pinnedEntries.length;
-            updateFilteredModel();
+            if (!data) {
+                return
+            }
+            if (typeof data.pinnedCount === "number" && data.pinnedCount !== root.pinnedCount) {
+                root.pinnedCount = data.pinnedCount;
+                root.refreshPinned();
+            }
+            if (!root.filterActive && typeof data.totalCount === "number") {
+                root.totalCount = data.totalCount;
+            }
+            // Background changes only refresh the head page of an
+            // unfiltered view. Filtered views re-request on demand so
+            // typing never competes with incoming updates.
+            if (root.isLoading || root.filterActive || root.selectedIndex > 0 || root.unpinnedEntries.length > root.pageSize) {
+                return;
+            }
+            root.requestPage(true);
         }
     }
 }

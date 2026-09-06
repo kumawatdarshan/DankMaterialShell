@@ -69,3 +69,31 @@ func EmacsConfigDir() string {
 
 	return ""
 }
+
+func ClipboardDBPath() (string, error) {
+	newDir := filepath.Join(XDGCacheHome(), "DankMaterialShell", "clipboard")
+	newPath := filepath.Join(newDir, "db")
+
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath, nil
+	}
+
+	oldDir := filepath.Join(XDGCacheHome(), "dms-clipboard")
+	oldPath := filepath.Join(oldDir, "db")
+
+	if _, err := os.Stat(oldPath); err == nil {
+		if err := os.MkdirAll(newDir, 0o700); err != nil {
+			return "", err
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return "", err
+		}
+		_ = os.Remove(oldDir)
+		return newPath, nil
+	}
+
+	if err := os.MkdirAll(newDir, 0o700); err != nil {
+		return "", err
+	}
+	return newPath, nil
+}

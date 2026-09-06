@@ -30,7 +30,9 @@ import (
 
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	serverclipboard "github.com/AvengeMedia/DankMaterialShell/core/internal/server/clipboard"
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
 	"github.com/AvengeMedia/dankgo/wlclipboard"
 	"github.com/spf13/cobra"
 )
@@ -352,7 +354,7 @@ func runClipWatch(cmd *cobra.Command, args []string) {
 		}
 	case clipWatchStore:
 		if err := wlclipboard.Watch(ctx, func(data []byte, mimeType string) {
-			if err := clipboard.Store(data, mimeType); err != nil {
+			if err := serverclipboard.StoreStandalone(data, mimeType); err != nil {
 				log.Errorf("store: %v", err)
 			}
 		}); err != nil && err != context.Canceled {
@@ -822,7 +824,7 @@ func runClipImport(cmd *cobra.Command, args []string) {
 			entryData = []byte(dataStr)
 		}
 
-		if err := clipboard.Store(entryData, mimeType); err != nil {
+		if err := serverclipboard.StoreStandalone(entryData, mimeType); err != nil {
 			log.Errorf("Failed to store entry: %v", err)
 			continue
 		}
@@ -865,7 +867,7 @@ func runClipMigrate(cmd *cobra.Command, args []string) {
 			}
 
 			mimeType := detectMimeType(v)
-			if err := clipboard.Store(v, mimeType); err != nil {
+			if err := serverclipboard.StoreStandalone(v, mimeType); err != nil {
 				log.Errorf("Failed to store entry %d: %v", btoi(k), err)
 				continue
 			}
@@ -893,11 +895,7 @@ func runClipMigrate(cmd *cobra.Command, args []string) {
 }
 
 func getCliphistPath() string {
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return filepath.Join(os.Getenv("HOME"), ".cache", "cliphist", "db")
-	}
-	return filepath.Join(cacheDir, "cliphist", "db")
+	return filepath.Join(utils.XDGCacheHome(), "cliphist", "db")
 }
 
 func detectMimeType(data []byte) string {
