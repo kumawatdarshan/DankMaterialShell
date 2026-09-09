@@ -135,6 +135,43 @@ func (m *Manager) findInDir(dir, pluginID string) (string, error) {
 	return "", nil
 }
 
+// InstalledIDs lists every installed plugin ID in a single pass over the
+// user and system plugin directories. It backs batched installed checks so
+// search result mapping does not re-scan the filesystem per plugin.
+func (m *Manager) InstalledIDs() (map[string]bool, error) {
+	ids := make(map[string]bool)
+	for _, dir := range []string{m.pluginsDir, "/etc/xdg/quickshell/dms-plugins"} {
+		entries, err := afero.ReadDir(m.fs, dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == ".repos" || strings.HasSuffix(name, ".meta") {
+				continue
+			}
+
+			fullPath := filepath.Join(dir, name)
+			isPlugin := entry.IsDir() || entry.Mode()&os.ModeSymlink != 0
+			if !isPlugin {
+				if info, err := m.fs.Stat(fullPath); err == nil && info.IsDir() {
+					isPlugin = true
+				}
+			}
+			if !isPlugin {
+				continue
+			}
+
+			ids[name] = true
+			if id := m.getPluginID(fullPath); id != "" {
+				ids[id] = true
+			}
+		}
+	}
+	return ids, nil
+}
+
 func (m *Manager) Install(plugin Plugin) error {
 	if !isSafePluginPathComponent(plugin.ID) {
 		return fmt.Errorf("invalid plugin id: %q", plugin.ID)

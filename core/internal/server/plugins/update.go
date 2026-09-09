@@ -43,6 +43,7 @@ func HandleUpdate(conn *models.Conn, req models.Request) {
 			models.RespondError(conn, req.ID, fmt.Sprintf("failed to update plugin: %v", err))
 			return
 		}
+		InvalidateSearchCache()
 		models.Respond(conn, req.ID, SuccessResult{
 			Success: true,
 			Message: fmt.Sprintf("plugin updated: %s", plugin.Name),
@@ -56,6 +57,7 @@ func HandleUpdate(conn *models.Conn, req models.Request) {
 		return
 	}
 
+	InvalidateSearchCache()
 	models.Respond(conn, req.ID, SuccessResult{
 		Success: true,
 		Message: fmt.Sprintf("plugin updated: %s", name),

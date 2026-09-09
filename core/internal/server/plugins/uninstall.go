@@ -45,6 +45,7 @@ func HandleUninstall(conn *models.Conn, req models.Request) {
 			models.RespondError(conn, req.ID, fmt.Sprintf("failed to uninstall plugin: %v", err))
 			return
 		}
+		InvalidateSearchCache()
 		models.Respond(conn, req.ID, SuccessResult{
 			Success: true,
 			Message: fmt.Sprintf("plugin uninstalled: %s", plugin.Name),
@@ -58,6 +59,7 @@ func HandleUninstall(conn *models.Conn, req models.Request) {
 		return
 	}
 
+	InvalidateSearchCache()
 	models.Respond(conn, req.ID, SuccessResult{
 		Success: true,
 		Message: fmt.Sprintf("plugin uninstalled: %s", name),

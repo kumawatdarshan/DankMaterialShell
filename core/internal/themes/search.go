@@ -1,8 +1,6 @@
 package themes
 
 import (
-	"strings"
-
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
 )
 
@@ -11,22 +9,11 @@ func FuzzySearch(query string, themes []Theme) []Theme {
 		return themes
 	}
 
-	queryLower := strings.ToLower(query)
 	return utils.Filter(themes, func(t Theme) bool {
-		return fuzzyMatch(queryLower, strings.ToLower(t.Name)) ||
-			fuzzyMatch(queryLower, strings.ToLower(t.Description)) ||
-			fuzzyMatch(queryLower, strings.ToLower(t.Author))
+		return utils.FoldSubsequence(query, t.Name) ||
+			utils.FoldSubsequence(query, t.Description) ||
+			utils.FoldSubsequence(query, t.Author)
 	})
-}
-
-func fuzzyMatch(query, text string) bool {
-	queryIdx := 0
-	for _, char := range text {
-		if queryIdx < len(query) && char == rune(query[queryIdx]) {
-			queryIdx++
-		}
-	}
-	return queryIdx == len(query)
 }
 
 func FindByIDOrName(idOrName string, themes []Theme) *Theme {

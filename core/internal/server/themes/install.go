@@ -44,6 +44,7 @@ func HandleInstall(conn *models.Conn, req models.Request) {
 		return
 	}
 
+	InvalidateSearchCache()
 	models.Respond(conn, req.ID, models.SuccessResult{
 		Success: true,
 		Message: fmt.Sprintf("theme installed: %s", theme.Name),

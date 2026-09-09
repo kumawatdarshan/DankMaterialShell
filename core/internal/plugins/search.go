@@ -12,23 +12,12 @@ func FuzzySearch(query string, plugins []Plugin) []Plugin {
 		return plugins
 	}
 
-	queryLower := strings.ToLower(query)
 	return utils.Filter(plugins, func(p Plugin) bool {
-		return fuzzyMatch(queryLower, strings.ToLower(p.Name)) ||
-			fuzzyMatch(queryLower, strings.ToLower(p.Category)) ||
-			fuzzyMatch(queryLower, strings.ToLower(p.Description)) ||
-			fuzzyMatch(queryLower, strings.ToLower(p.Author))
+		return utils.FoldSubsequence(query, p.Name) ||
+			utils.FoldSubsequence(query, p.Category) ||
+			utils.FoldSubsequence(query, p.Description) ||
+			utils.FoldSubsequence(query, p.Author)
 	})
-}
-
-func fuzzyMatch(query, text string) bool {
-	queryIdx := 0
-	for _, char := range text {
-		if queryIdx < len(query) && char == rune(query[queryIdx]) {
-			queryIdx++
-		}
-	}
-	return queryIdx == len(query)
 }
 
 func FilterByCategory(category string, plugins []Plugin) []Plugin {

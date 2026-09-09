@@ -43,6 +43,7 @@ func HandleUninstall(conn *models.Conn, req models.Request) {
 			models.RespondError(conn, req.ID, fmt.Sprintf("failed to uninstall theme: %v", err))
 			return
 		}
+		InvalidateSearchCache()
 		models.Respond(conn, req.ID, models.SuccessResult{
 			Success: true,
 			Message: fmt.Sprintf("theme uninstalled: %s", theme.Name),
@@ -55,6 +56,7 @@ func HandleUninstall(conn *models.Conn, req models.Request) {
 		return
 	}
 
+	InvalidateSearchCache()
 	models.Respond(conn, req.ID, models.SuccessResult{
 		Success: true,
 		Message: fmt.Sprintf("theme uninstalled: %s", idOrName),

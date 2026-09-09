@@ -2,10 +2,60 @@ package plugins
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/plugins"
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
 )
+
+type searchIndex struct {
+	list      []plugins.Plugin
+	installed map[string]bool
+}
+
+var (
+	searchCacheMu sync.Mutex
+	searchCache   *searchIndex
+)
+
+// InvalidateSearchCache drops the memoized registry list. Callers mutate
+// plugin state through install/uninstall/update and flush on success.
+func InvalidateSearchCache() {
+	searchCacheMu.Lock()
+	defer searchCacheMu.Unlock()
+	searchCache = nil
+}
+
+func getSearchIndex() (*searchIndex, error) {
+	searchCacheMu.Lock()
+	defer searchCacheMu.Unlock()
+	if searchCache != nil {
+		return searchCache, nil
+	}
+
+	registry, err := plugins.NewRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registry: %w", err)
+	}
+
+	pluginList, err := registry.List()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list plugins: %w", err)
+	}
+
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	installed, err := manager.InstalledIDs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list installed plugins: %w", err)
+	}
+
+	searchCache = &searchIndex{list: pluginList, installed: installed}
+	return searchCache, nil
+}
 
 func HandleSearch(conn *models.Conn, req models.Request) {
 	query, ok := models.Get[string](req, "query")
@@ -14,19 +64,13 @@ func HandleSearch(conn *models.Conn, req models.Request) {
 		return
 	}
 
-	registry, err := plugins.NewRegistry()
+	index, err := getSearchIndex()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create registry: %v", err))
+		models.RespondError(conn, req.ID, err.Error())
 		return
 	}
 
-	pluginList, err := registry.List()
-	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list plugins: %v", err))
-		return
-	}
-
-	searchResults := plugins.FuzzySearch(query, pluginList)
+	searchResults := plugins.FuzzySearch(query, index.list)
 
 	if category := models.GetOr(req, "category", ""); category != "" {
 		searchResults = plugins.FilterByCategory(category, searchResults)
@@ -42,17 +86,10 @@ func HandleSearch(conn *models.Conn, req models.Request) {
 
 	searchResults = plugins.SortByFirstParty(searchResults)
 
-	manager, err := plugins.NewManager()
-	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create manager: %v", err))
-		return
-	}
-
 	result := make([]PluginInfo, len(searchResults))
 	for i, p := range searchResults {
-		installed, _ := manager.IsInstalled(p)
 		info := pluginInfoFromPlugin(p)
-		info.Installed = installed
+		info.Installed = index.installed[p.ID]
 		result[i] = info
 	}
 
