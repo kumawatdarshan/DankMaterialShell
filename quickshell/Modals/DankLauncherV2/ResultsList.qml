@@ -20,6 +20,52 @@ Item {
 
     signal itemRightClicked(int index, var item, real mouseX, real mouseY)
 
+    // Hoisted grid cell components: defining them inside the Repeater
+    // delegate below would mint a new QQmlComponent per cell. They read
+    // per-cell data through their Loader (parent.cellData) so every
+    // instance stays reactive without capturing delegate scope.
+    Component {
+        id: gridCellComponent
+
+        GridItem {
+            item: parent.cellData?.item ?? null
+            isSelected: (parent.cellData?.flatIndex ?? -1) === root.controller?.selectedFlatIndex
+            controller: root.controller
+            flatIndex: parent.cellData?.flatIndex ?? -1
+
+            onClicked: {
+                if (root.controller && parent.cellData?.item) {
+                    root.controller.executeItem(parent.cellData.item);
+                }
+            }
+
+            onRightClicked: (mouseX, mouseY) => {
+                root.itemRightClicked(parent.cellData?.flatIndex ?? -1, parent.cellData?.item ?? null, mouseX, mouseY);
+            }
+        }
+    }
+
+    Component {
+        id: tileCellComponent
+
+        TileItem {
+            item: parent.cellData?.item ?? null
+            isSelected: (parent.cellData?.flatIndex ?? -1) === root.controller?.selectedFlatIndex
+            controller: root.controller
+            flatIndex: parent.cellData?.flatIndex ?? -1
+
+            onClicked: {
+                if (root.controller && parent.cellData?.item) {
+                    root.controller.executeItem(parent.cellData.item);
+                }
+            }
+
+            onRightClicked: (mouseX, mouseY) => {
+                root.itemRightClicked(parent.cellData?.flatIndex ?? -1, parent.cellData?.item ?? null, mouseX, mouseY);
+            }
+        }
+    }
+
     function _rebuildVisualModel() {
         var sections = root.controller?.sections ?? [];
         var rows = [];
@@ -315,49 +361,8 @@ Item {
                                     width: parent.width - 4
                                     height: parent.height - 4
                                     anchors.centerIn: parent
+                                    property var cellData: gridCellDelegate.modelData
                                     sourceComponent: gridCellDelegate.isTile ? tileCellComponent : gridCellComponent
-
-                                    Component {
-                                        id: gridCellComponent
-
-                                        GridItem {
-                                            item: gridCellDelegate.modelData?.item ?? null
-                                            isSelected: (gridCellDelegate.modelData?.flatIndex ?? -1) === root.controller?.selectedFlatIndex
-                                            controller: root.controller
-                                            flatIndex: gridCellDelegate.modelData?.flatIndex ?? -1
-
-                                            onClicked: {
-                                                if (root.controller && gridCellDelegate.modelData?.item) {
-                                                    root.controller.executeItem(gridCellDelegate.modelData.item);
-                                                }
-                                            }
-
-                                            onRightClicked: (mouseX, mouseY) => {
-                                                root.itemRightClicked(gridCellDelegate.modelData?.flatIndex ?? -1, gridCellDelegate.modelData?.item ?? null, mouseX, mouseY);
-                                            }
-                                        }
-                                    }
-
-                                    Component {
-                                        id: tileCellComponent
-
-                                        TileItem {
-                                            item: gridCellDelegate.modelData?.item ?? null
-                                            isSelected: (gridCellDelegate.modelData?.flatIndex ?? -1) === root.controller?.selectedFlatIndex
-                                            controller: root.controller
-                                            flatIndex: gridCellDelegate.modelData?.flatIndex ?? -1
-
-                                            onClicked: {
-                                                if (root.controller && gridCellDelegate.modelData?.item) {
-                                                    root.controller.executeItem(gridCellDelegate.modelData.item);
-                                                }
-                                            }
-
-                                            onRightClicked: (mouseX, mouseY) => {
-                                                root.itemRightClicked(gridCellDelegate.modelData?.flatIndex ?? -1, gridCellDelegate.modelData?.item ?? null, mouseX, mouseY);
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }

@@ -5,6 +5,7 @@ import QtQuick
 import Quickshell
 import qs.Common
 import qs.Services
+import "../Common/SearchUtils.js" as SearchUtils
 
 Singleton {
     id: root
@@ -15,6 +16,18 @@ Singleton {
     property var _cachedCategories: null
     property var _cachedVisibleApps: null
     property var _hiddenAppsSet: new Set()
+
+    // Normalized search index over the visible apps. Each entry keeps the
+    // app reference plus pre-folded fields, laid out as
+    // [name, genericName, comment, id, ...keywords], with tokenized name
+    // words attached for boundary matching. Rebuilt whenever the visible
+    // set changes; null means stale.
+    property var _searchIndex: null
+
+    function invalidateVisibleApps() {
+        _cachedVisibleApps = null;
+        _searchIndex = null;
+    }
 
     property var _transformCache: ({})
     property var _cachedDefaultSections: []
@@ -51,7 +64,7 @@ Singleton {
     function refreshApplications() {
         applications = DesktopEntries.applications.values;
         _cachedCategories = null;
-        _cachedVisibleApps = null;
+        invalidateVisibleApps();
         invalidateLauncherCache();
     }
 
@@ -102,7 +115,7 @@ Singleton {
 
     function _rebuildHiddenSet() {
         _hiddenAppsSet = new Set(SessionData.hiddenApps || []);
-        _cachedVisibleApps = null;
+        invalidateVisibleApps();
     }
 
     function isAppHidden(app) {
@@ -124,9 +137,20 @@ Singleton {
                 if (id)
                     seen.add(id);
                 return true;
+            }).map(app => applyAppOverride(app));
+        }
+        return _cachedVisibleApps.slice();
+    }
+
+    function _ensureSearchIndex() {
+        if (_searchIndex === null) {
+            const fields = ["name", "genericName", "comment", "id", "keywords"];
+            _searchIndex = SearchUtils.buildNormalizedIndex(getVisibleApplications(), fields).map(entry => {
+                entry.nameTokens = SearchUtils.tokenize(entry.folded[0]);
+                return entry;
             });
         }
-        return _cachedVisibleApps.map(app => applyAppOverride(app));
+        return _searchIndex;
     }
 
     Connections {
@@ -136,7 +160,7 @@ Singleton {
             root.invalidateLauncherCache();
         }
         function onAppOverridesChanged() {
-            root._cachedVisibleApps = null;
+            root.invalidateVisibleApps();
             root.invalidateLauncherCache();
         }
     }
@@ -621,6 +645,50 @@ Singleton {
         };
     }
 
+    function topKScored(scored, k) {
+        const picked = [];
+        const used = new Array(scored.length).fill(false);
+        const limit = Math.min(k, scored.length);
+        for (let p = 0; p < limit; p++) {
+            let best = -1;
+            for (let i = 0; i < scored.length; i++) {
+                if (used[i]) {
+                    continue;
+                }
+                if (best === -1 || scored[i].score > scored[best].score) {
+                    best = i;
+                }
+            }
+            if (best === -1) {
+                break;
+            }
+            used[best] = true;
+            picked.push(scored[best]);
+        }
+        return picked;
+    }
+
+    // Token-level counterpart of wordBoundaryMatch operating on an already
+    // tokenized haystack and query. Same prefix-window semantics.
+    function wordBoundaryTokens(textTokens, queryTokens) {
+        if (queryTokens.length === 0 || queryTokens.length > textTokens.length) {
+            return false;
+        }
+        for (let i = 0; i <= textTokens.length - queryTokens.length; i++) {
+            let allMatch = true;
+            for (let j = 0; j < queryTokens.length; j++) {
+                if (textTokens[i + j].indexOf(queryTokens[j]) !== 0) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (allMatch) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function searchApplications(query) {
         if (!query || query.length === 0)
             return getVisibleApplications();
@@ -628,16 +696,18 @@ Singleton {
             return [];
 
         const queryLower = query.toLowerCase().trim();
+        const queryTokens = tokenize(queryLower);
         const scoredApps = [];
         const results = [];
-        const visibleApps = getVisibleApplications();
+        const index = _ensureSearchIndex();
 
-        for (const app of visibleApps) {
-            const name = (app.name || "").toLowerCase();
-            const genericName = (app.genericName || "").toLowerCase();
-            const comment = (app.comment || "").toLowerCase();
-            const id = (app.id || "").toLowerCase();
-            const keywords = app.keywords ? app.keywords.map(k => k.toLowerCase()) : [];
+        for (const entry of index) {
+            const app = entry.item;
+            const name = entry.folded[0];
+            const genericName = entry.folded[1];
+            const comment = entry.folded[2];
+            const id = entry.folded[3];
+            const keywords = entry.folded.slice(4);
 
             let textScore = 0;
             let matchType = "none";
@@ -648,7 +718,7 @@ Singleton {
             } else if (name.startsWith(queryLower)) {
                 textScore = 5000;
                 matchType = "prefix";
-            } else if (wordBoundaryMatch(name, queryLower)) {
+            } else if (wordBoundaryTokens(entry.nameTokens, queryTokens)) {
                 textScore = 3000;
                 matchType = "word_boundary";
             } else if (name.includes(queryLower)) {
@@ -718,7 +788,7 @@ Singleton {
         }
 
         if (SessionData.searchAppActions) {
-            const actionResults = searchAppActions(queryLower, visibleApps);
+            const actionResults = searchAppActions(queryLower, getVisibleApplications());
             for (const actionResult of actionResults) {
                 scoredApps.push({
                     app: actionResult.app,
@@ -727,8 +797,7 @@ Singleton {
             }
         }
 
-        scoredApps.sort((a, b) => b.score - a.score);
-        return scoredApps.slice(0, maxResults).map(item => item.app);
+        return topKScored(scoredApps, maxResults).map(item => item.app);
     }
 
     function searchAppActions(query, apps) {
