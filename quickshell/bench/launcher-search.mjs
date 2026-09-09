@@ -139,20 +139,23 @@ function main() {
         "id",
     ]);
 
-    // Production pipeline since PR7: cheap gate, then ranked scoring on the
-    // gated subset, top 10.
+    // Production pipeline since PR7: cheap score gate, fuzzy top-up when
+    // scarce, then ranked scoring on the candidate set, top 10.
     const pipeline = (query) => {
         const q = query.toLowerCase().trim();
         if (!q) return items.slice(0, 10);
-        const gated = [];
-        for (const entry of index) {
-            const fields = entry.folded;
-            for (let i = 0; i < fields.length; i++) {
-                if (fields[i].includes(q)) {
-                    gated.push(entry.item);
-                    break;
-                }
+        const qq = SU.foldAndTokenize(q);
+        let gated = index.filter((e) => SU.score(e, qq) > 0).map((e) => e.item);
+        if (gated.length < 10 && q.length >= 3) {
+            const excluded = new Set(gated);
+            const scored = [];
+            for (const item of items) {
+                if (excluded.has(item)) continue;
+                const fs = scorer.fuzzyScore((item.name || "").toLowerCase(), q);
+                if (fs > 0) scored.push({ item, s: fs });
             }
+            scored.sort((a, b) => b.s - a.s);
+            for (let j = 0; j < scored.length && gated.length < 10; j++) gated.push(scored[j].item);
         }
         return scorer.scoreItems(gated, query, frecencyStub).slice(0, 10);
     };

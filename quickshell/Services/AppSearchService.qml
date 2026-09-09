@@ -499,31 +499,28 @@ Singleton {
     }
 
     // Filter-only gate over the normalized index: admits every visible app
-    // with a cheap substring hit on any folded field, unsorted and uncapped.
-    // Ranking (including typo-tolerant fuzzy) is Scorer.scoreItems' job in
-    // the Controller. Note this drops typo-only matches that share no
-    // substring with any field; exact, prefix, boundary, keyword, generic,
-    // id, and multi-word queries are unaffected.
+    // Scorer.scoreItems could rank above zero (exact, prefix, boundary,
+    // substring, keyword, generic, id, multi-word), unsorted and uncapped.
+    // Only typo-only matches (no scoreable relation) fall through; the
+    // Controller tops those up with Scorer fuzzy matching when results are
+    // scarce, so typo tolerance is preserved without per-keystroke
+    // Levenshtein matrices over the whole corpus.
     function searchApplications(query) {
         if (!query || query.length === 0)
             return getVisibleApplications();
         if (applications.length === 0)
             return [];
 
-        const queryLower = query.toLowerCase().trim();
-        if (queryLower.length === 0)
+        const q = SearchUtils.foldAndTokenize(query);
+        if (q.folded.length === 0)
             return getVisibleApplications();
 
         const matches = [];
         const index = _ensureSearchIndex();
 
         for (const entry of index) {
-            const fields = entry.folded;
-            for (let i = 0; i < fields.length; i++) {
-                if (fields[i].indexOf(queryLower) !== -1) {
-                    matches.push(entry.item);
-                    break;
-                }
+            if (SearchUtils.score(entry, q) > 0) {
+                matches.push(entry.item);
             }
         }
         return matches;

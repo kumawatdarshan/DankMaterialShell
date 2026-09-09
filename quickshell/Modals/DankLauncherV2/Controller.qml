@@ -1227,6 +1227,10 @@ Item {
 
     function searchApps(query) {
         var apps = AppSearchService.searchApplications(query);
+        var folded = (query || "").toLowerCase().trim();
+        if (apps.length < 10 && folded.length >= 3) {
+            apps = apps.concat(fuzzyTopUpApps(folded, apps, 10 - apps.length));
+        }
         var items = [];
 
         for (var i = 0; i < apps.length; i++) {
@@ -1239,6 +1243,36 @@ Item {
         }
 
         return items;
+    }
+
+    // Typo-tolerant top-up for scarce gate results, using Scorer's fuzzy
+    // matcher (the single Levenshtein implementation) over apps the gate
+    // did not admit. Runs only when the gate yields fewer than 10 items.
+    function fuzzyTopUpApps(queryLower, excludeApps, limit) {
+        var excluded = new Set(excludeApps);
+        var visible = AppSearchService.getVisibleApplications();
+        var scored = [];
+        for (var i = 0; i < visible.length; i++) {
+            var app = visible[i];
+            if (excluded.has(app)) {
+                continue;
+            }
+            var fs = Scorer.fuzzyScore((app.name || "").toLowerCase(), queryLower);
+            if (fs > 0) {
+                scored.push({
+                    app: app,
+                    score: fs
+                });
+            }
+        }
+        scored.sort(function (a, b) {
+            return b.score - a.score;
+        });
+        var topUp = [];
+        for (var j = 0; j < scored.length && topUp.length < limit; j++) {
+            topUp.push(scored[j].app);
+        }
+        return topUp;
     }
 
     function transformApp(app) {
