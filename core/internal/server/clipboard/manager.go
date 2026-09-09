@@ -1494,9 +1494,18 @@ func (m *Manager) Search(params SearchParams) SearchResult {
 	}
 
 	query := strings.ToLower(params.Query)
-	mimeFilter := strings.ToLower(params.MimeType)
 
-	var all []Entry
+	page := make([]Entry, 0, params.Limit+1)
+	total := -1
+	totalKnown := false
+	hasMore := false
+
+	if query == "" && (params.EntryType == "" || params.EntryType == "all") &&
+		params.Pinned != nil && !*params.Pinned {
+		total = int(m.unpinnedCount.Load())
+		totalKnown = true
+	}
+
 	if err := m.dbView(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
@@ -1504,49 +1513,86 @@ func (m *Manager) Search(params SearchParams) SearchResult {
 		}
 
 		c := b.Cursor()
-		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+		var k, v []byte
+		if params.BeforeID != nil && *params.BeforeID > 0 {
+			k, v = c.Seek(itob(*params.BeforeID))
+			if k == nil {
+				k, v = c.Last()
+			} else if bytes.Compare(k, itob(*params.BeforeID)) >= 0 {
+				k, v = c.Prev()
+			}
+		} else {
+			k, v = c.Last()
+		}
+
+		for ; k != nil; k, v = c.Prev() {
+			if !matchRow(v, query, params.EntryType, params.Pinned) {
+				continue
+			}
+			if len(page) > params.Limit {
+				hasMore = true
+				break
+			}
 			entry, err := decodeEntryMeta(v)
 			if err != nil {
 				continue
 			}
-
-			if params.IsImage != nil && entry.IsImage != *params.IsImage {
-				continue
-			}
-
-			if mimeFilter != "" && !strings.Contains(strings.ToLower(entry.MimeType), mimeFilter) {
-				continue
-			}
-
-			if params.Before != nil && entry.Timestamp.Unix() >= *params.Before {
-				continue
-			}
-
-			if params.After != nil && entry.Timestamp.Unix() <= *params.After {
-				continue
-			}
-
-			if query != "" && !strings.Contains(strings.ToLower(entry.Preview), query) {
-				continue
-			}
-
-			all = append(all, entry)
+			page = append(page, entry)
+		}
+		if len(page) > params.Limit {
+			page = page[:params.Limit]
+			hasMore = true
 		}
 		return nil
 	}); err != nil {
 		log.Errorf("Search failed: %v", err)
 	}
 
-	total := len(all)
-
-	start := min(params.Offset, total)
-	end := min(start+params.Limit, total)
-
 	return SearchResult{
-		Entries: all[start:end],
-		Total:   total,
-		HasMore: end < total,
+		Entries:    page,
+		Total:      total,
+		TotalKnown: totalKnown,
+		HasMore:    hasMore,
 	}
+}
+
+// DeleteMatching removes unpinned entries matching the given query and
+// entry type filter, reporting how many rows were removed. It backs the
+// clipboard modal's "clear filtered" action once the client holds only one
+// page of results.
+func (m *Manager) DeleteMatching(query, entryType string) (int, error) {
+	if m.db == nil {
+		return 0, fmt.Errorf("database not available")
+	}
+
+	query = strings.ToLower(query)
+	unpinned := false
+	deleted := 0
+	err := m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
+		b := tx.Bucket([]byte("clipboard"))
+		if b == nil {
+			return false, 0, nil
+		}
+		var toDelete [][]byte
+		c := b.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			if !matchRow(v, query, entryType, &unpinned) {
+				continue
+			}
+			toDelete = append(toDelete, append([]byte(nil), k...))
+		}
+		for _, k := range toDelete {
+			if err := b.Delete(k); err != nil {
+				return false, 0, err
+			}
+			deleted++
+		}
+		return deleted > 0, -deleted, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 func (m *Manager) GetConfig() Config {

@@ -118,22 +118,30 @@ func BenchmarkSearch_QueryNoMatch(b *testing.B) {
 	}
 }
 
-func BenchmarkSearch_OffsetDeep(b *testing.B) {
+func BenchmarkSearch_CursorDeep(b *testing.B) {
 	m := newBenchManager(b, benchEntryCount)
+	first := m.Search(SearchParams{Limit: 50})
+	if len(first.Entries) != 50 {
+		b.Fatalf("expected 50 entries, got %d", len(first.Entries))
+	}
+	anchor := first.Entries[len(first.Entries)-1].ID
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		res := m.Search(SearchParams{Limit: 50, Offset: 1500})
-		if len(res.Entries) == 0 {
-			b.Fatal("expected entries")
+		res := m.Search(SearchParams{Limit: 50, BeforeID: &anchor})
+		if len(res.Entries) != 50 {
+			b.Fatalf("expected 50 entries, got %d", len(res.Entries))
+		}
+		if res.Entries[0].ID != anchor-1 {
+			b.Fatalf("expected continuity at %d, got %d", anchor-1, res.Entries[0].ID)
 		}
 	}
 }
 
-func BenchmarkSearch_MimeImage(b *testing.B) {
+func BenchmarkSearch_EntryTypeImage(b *testing.B) {
 	m := newBenchManager(b, benchEntryCount)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		res := m.Search(SearchParams{MimeType: "image", Limit: 50})
+		res := m.Search(SearchParams{EntryType: "image", Limit: 50})
 		if len(res.Entries) == 0 {
 			b.Fatal("expected matches")
 		}

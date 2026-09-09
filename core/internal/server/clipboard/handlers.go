@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	clipboardstore "github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
+	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
 	"github.com/AvengeMedia/dankgo/ipc/params"
 )
@@ -23,6 +25,8 @@ func HandleRequest(conn *models.Conn, req models.Request, m *Manager) {
 		handleDeleteEntry(conn, req, m)
 	case "clipboard.deleteEntries":
 		handleDeleteEntries(conn, req, m)
+	case "clipboard.deleteMatching":
+		handleDeleteMatching(conn, req, m)
 	case "clipboard.clearHistory":
 		handleClearHistory(conn, req, m)
 	case "clipboard.copy":
@@ -64,7 +68,12 @@ func handleGetState(conn *models.Conn, req models.Request, m *Manager) {
 	models.Respond(conn, req.ID, m.GetState())
 }
 
+var getHistoryWarnOnce sync.Once
+
 func handleGetHistory(conn *models.Conn, req models.Request, m *Manager) {
+	getHistoryWarnOnce.Do(func() {
+		log.Warnf("clipboard.getHistory is deprecated, use clipboard.search")
+	})
 	history := m.GetHistory()
 	for i := range history {
 		history[i].Data = nil
@@ -296,25 +305,34 @@ func handleSubscribe(conn *models.Conn, req models.Request, m *Manager) {
 
 func handleSearch(conn *models.Conn, req models.Request, m *Manager) {
 	p := SearchParams{
-		Query:    params.StringOpt(req.Params, "query", ""),
-		MimeType: params.StringOpt(req.Params, "mimeType", ""),
-		Limit:    params.IntOpt(req.Params, "limit", 50),
-		Offset:   params.IntOpt(req.Params, "offset", 0),
+		Query:     params.StringOpt(req.Params, "query", ""),
+		EntryType: params.StringOpt(req.Params, "entryType", ""),
+		Limit:     params.IntOpt(req.Params, "limit", 50),
 	}
 
-	if img, ok := models.Get[bool](req, "isImage"); ok {
-		p.IsImage = &img
+	if pinned, ok := models.Get[bool](req, "pinned"); ok {
+		p.Pinned = &pinned
 	}
-	if b, ok := models.Get[float64](req, "before"); ok {
-		v := int64(b)
-		p.Before = &v
-	}
-	if a, ok := models.Get[float64](req, "after"); ok {
-		v := int64(a)
-		p.After = &v
+	if raw, ok := req.Params["beforeId"]; ok && raw != nil {
+		if id, err := toEntryID(raw); err == nil {
+			p.BeforeID = &id
+		}
 	}
 
 	models.Respond(conn, req.ID, m.Search(p))
+}
+
+func handleDeleteMatching(conn *models.Conn, req models.Request, m *Manager) {
+	query := params.StringOpt(req.Params, "query", "")
+	entryType := params.StringOpt(req.Params, "entryType", "")
+
+	deleted, err := m.DeleteMatching(query, entryType)
+	if err != nil {
+		models.RespondError(conn, req.ID, err.Error())
+		return
+	}
+
+	models.Respond(conn, req.ID, map[string]int{"deleted": deleted})
 }
 
 func handleGetConfig(conn *models.Conn, req models.Request, m *Manager) {

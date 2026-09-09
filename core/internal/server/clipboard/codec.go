@@ -5,10 +5,16 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// longTextThreshold mirrors ClipboardConstants.longTextThreshold in
+// quickshell/Modals/Clipboard/ClipboardConstants.qml, which owns the
+// text/long_text boundary for display. Kept in sync manually.
+const longTextThreshold = 200
 
 // entryHeader exposes the leading fields of an encoded row without decoding
 // the payload. mimeType and preview alias the input slice: no allocation.
@@ -284,6 +290,102 @@ func extractHash(data []byte) uint64 {
 		return 0
 	}
 	return h.hash
+}
+
+// matchEntryType applies the QML clipboard type filter. "text" is short
+// text only, matching getEntryType equality in the modal; unknown values
+// match nothing so typos fail visibly instead of silently unfiltering.
+func matchEntryType(isImage bool, size int, entryType string) bool {
+	switch entryType {
+	case "", "all":
+		return true
+	case "image":
+		return isImage
+	case "text":
+		return !isImage && size <= longTextThreshold
+	case "long_text":
+		return !isImage && size > longTextThreshold
+	default:
+		return false
+	}
+}
+
+// containsFoldBytes reports whether the already-lowercased lowerSubstr
+// occurs in s, folding ASCII uppercase on the fly without allocating.
+// Non-ASCII bytes compare literally, so callers must route non-ASCII
+// haystacks through matchPreviewFold instead.
+func containsFoldBytes(s []byte, lowerSubstr string) bool {
+	if lowerSubstr == "" {
+		return true
+	}
+	if len(lowerSubstr) > len(s) {
+		return false
+	}
+	for i := 0; i+len(lowerSubstr) <= len(s); i++ {
+		match := true
+		for j := 0; j < len(lowerSubstr); j++ {
+			c := s[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != lowerSubstr[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIBytes(s []byte) bool {
+	for _, c := range s {
+		if c >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// matchPreviewFold is the allocation-free fast path for ASCII previews with
+// a byte-exact slow path for the rest, preserving strings.Contains over the
+// lowercased preview in all cases.
+func matchPreviewFold(preview []byte, queryLower string) bool {
+	if queryLower == "" {
+		return true
+	}
+	if isASCIIBytes(preview) {
+		return containsFoldBytes(preview, queryLower)
+	}
+	return strings.Contains(strings.ToLower(string(preview)), queryLower)
+}
+
+// matchRow applies query/entryType/pinned filters to a raw row, parsing
+// only the header and falling back to a full meta decode for rows in an
+// older layout. queryLower must already be lowercased.
+func matchRow(v []byte, queryLower, entryType string, pinned *bool) bool {
+	if h, ok := parseEntryHeader(v); ok {
+		if pinned != nil && h.pinned != *pinned {
+			return false
+		}
+		if !matchEntryType(h.isImage, h.size, entryType) {
+			return false
+		}
+		return matchPreviewFold(h.preview, queryLower)
+	}
+	e, err := decodeEntryMeta(v)
+	if err != nil {
+		return false
+	}
+	if pinned != nil && e.Pinned != *pinned {
+		return false
+	}
+	if !matchEntryType(e.IsImage, e.Size, entryType) {
+		return false
+	}
+	return matchPreviewFold([]byte(e.Preview), queryLower)
 }
 
 // dedupByHash deletes unpinned rows carrying hash, skipping pinned rows.

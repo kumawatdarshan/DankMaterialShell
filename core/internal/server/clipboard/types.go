@@ -82,19 +82,27 @@ func SaveConfig(cfg Config) error {
 }
 
 type SearchParams struct {
-	Query    string `json:"query"`
-	MimeType string `json:"mimeType"`
-	IsImage  *bool  `json:"isImage"`
-	Limit    int    `json:"limit"`
-	Offset   int    `json:"offset"`
-	Before   *int64 `json:"before"`
-	After    *int64 `json:"after"`
+	Query string `json:"query"`
+	// EntryType mirrors the QML clipboard filter: "all", "text",
+	// "long_text" or "image". Empty means "all".
+	EntryType string `json:"entryType"`
+	// Pinned filters by pin state. Nil means both, true means pinned only,
+	// false means unpinned only.
+	Pinned *bool `json:"pinned"`
+	Limit  int   `json:"limit"`
+	// BeforeID pages backwards from a previous page: the client passes the
+	// lowest entry ID it already holds; the cursor seeks to that key and
+	// walks to older rows. Nil (or 0) starts at the newest entry.
+	BeforeID *uint64 `json:"beforeId"`
 }
 
 type SearchResult struct {
 	Entries []Entry `json:"entries"`
-	Total   int     `json:"total"`
-	HasMore bool    `json:"hasMore"`
+	// Total is exact only when TotalKnown is true (plain unpinned view,
+	// served from the cached counter). Filtered searches report -1.
+	Total      int  `json:"total"`
+	TotalKnown bool `json:"totalKnown"`
+	HasMore    bool `json:"hasMore"`
 }
 
 type Entry struct {
