@@ -11,20 +11,24 @@ Singleton {
     id: root
     readonly property var log: Log.scoped("ClipboardService")
 
-    readonly property int longTextThreshold: 200
-
     readonly property bool clipboardAvailable: DMSService.isConnected && (DMSService.capabilities.length === 0 || DMSService.capabilities.includes("clipboard"))
     property bool pasteSupported: false
     readonly property bool pasteAvailable: clipboardAvailable && pasteSupported
 
     readonly property var terminalAppIds: ["kitty", "foot", "footclient", "alacritty", "st", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "ghostty", "org.kde.konsole", "konsole", "org.gnome.terminal", "gnome-terminal-server", "org.gnome.console", "kgx", "com.gexperts.tilix", "tilix", "terminator", "xfce4-terminal", "lxterminal", "deepin-terminal", "io.elementary.terminal", "rio", "contour", "wayst", "urxvt", "rxvt"]
 
-    property var internalEntries: []
     property var clipboardEntries: []
     property var unpinnedEntries: []
     property var pinnedEntries: []
     property int pinnedCount: 0
-    property int totalCount: 0
+    property int totalCount: -1
+    property bool hasMore: false
+    property bool isLoading: false
+    property int pageSize: 100
+    property int _searchSeq: 0
+    property int _pinnedSeq: 0
+    property var _preserveId: -1
+    property bool pendingStateUpdate: false
     property string searchText: ""
     property string activeFilter: "all"
     readonly property bool filterActive: searchText.trim().length > 0 || activeFilter !== "all"
@@ -85,55 +89,156 @@ Singleton {
     }
 
     function updateFilteredModel() {
-        const query = searchText.trim().toLowerCase();
-        const filterAll = activeFilter === "all";
-        const unpinned = [];
-        const pinned = [];
+        _searchSeq++;
+        root.isLoading = false;
+        root.unpinnedEntries = [];
+        root.hasMore = false;
+        root.pendingStateUpdate = false;
+        root._preserveId = -1;
+        searchDebounce.restart();
+    }
 
-        for (let i = 0; i < internalEntries.length; i++) {
-            const entry = internalEntries[i];
-            if (!filterAll && getEntryType(entry) !== activeFilter)
-                continue;
-            if (query.length > 0 && !entry.preview.toLowerCase().includes(query))
-                continue;
-            (entry.pinned ? pinned : unpinned).push(entry);
-        }
+    Timer {
+        id: searchDebounce
+        interval: 150
+        onTriggered: root.requestPage(true)
+    }
 
-        const byIdDesc = (a, b) => b.id - a.id;
-        pinned.sort(byIdDesc);
-        unpinned.sort(byIdDesc);
+    Timer {
+        id: stateUpdateDebounceTimer
+        interval: 150
+        onTriggered: root._flushStateUpdate()
+    }
 
-        pinnedEntries = pinned;
-        unpinnedEntries = unpinned;
-        clipboardEntries = pinned.concat(unpinned);
-        totalCount = clipboardEntries.length;
-
-        const activeCount = Math.max(unpinned.length, pinned.length);
-
-        if (activeCount === 0) {
-            keyboardNavigationActive = false;
-            selectedIndex = 0;
-            return;
-        }
-
-        if (selectedIndex >= activeCount)
-            selectedIndex = activeCount - 1;
+    function updateCombined() {
+        clipboardEntries = pinnedEntries.concat(unpinnedEntries);
     }
 
     function refresh() {
         if (!clipboardAvailable) {
             return;
         }
-        DMSService.sendRequest("clipboard.getHistory", null, function (response) {
-            if (response.error) {
-                log.warn("Failed to get history:", response.error);
+        searchDebounce.stop();
+        requestPinned();
+        requestPage(true);
+    }
+
+    function requestPage(reset) {
+        if (!clipboardAvailable) {
+            return;
+        }
+        if (reset) {
+            unpinnedEntries = [];
+            hasMore = false;
+        }
+        _searchSeq++;
+        const seq = _searchSeq;
+        isLoading = true;
+        const params = {
+            "limit": pageSize,
+            "pinned": false
+        };
+        const query = searchText.trim();
+        if (query.length > 0) {
+            params.query = query;
+        }
+        if (activeFilter !== "all") {
+            params.entryType = activeFilter;
+        }
+        if (!reset && unpinnedEntries.length > 0) {
+            params.beforeId = unpinnedEntries[unpinnedEntries.length - 1].id;
+        }
+        DMSService.sendRequest("clipboard.search", params, function (response) {
+            if (seq !== _searchSeq) {
                 return;
             }
-            internalEntries = response.result || [];
-            pinnedEntries = internalEntries.filter(e => e.pinned);
-            pinnedCount = pinnedEntries.length;
-            updateFilteredModel();
+            root.isLoading = false;
+            if (response.error) {
+                log.warn("Failed to load clipboard page:", response.error);
+                return;
+            }
+            const result = response.result || {};
+            const entries = result.entries || [];
+            if (reset) {
+                root.unpinnedEntries = entries;
+            } else {
+                root.unpinnedEntries = unpinnedEntries.concat(entries);
+            }
+            root.hasMore = result.hasMore === true;
+            if (result.totalKnown === true && typeof result.total === "number") {
+                root.totalCount = result.total;
+            } else {
+                root.totalCount = -1;
+            }
+            root.restorePreservedSelection();
+            root.updateCombined();
+            if (root.pendingStateUpdate) {
+                root.pendingStateUpdate = false;
+                root._refreshHead();
+            }
         });
+    }
+
+    function loadMore() {
+        if (isLoading || !hasMore) {
+            return;
+        }
+        requestPage(false);
+    }
+
+    function requestPinned() {
+        if (!clipboardAvailable) {
+            return;
+        }
+        _pinnedSeq++;
+        const seq = _pinnedSeq;
+        DMSService.sendRequest("clipboard.getPinnedEntries", null, function (response) {
+            if (seq !== _pinnedSeq) {
+                return;
+            }
+            if (response.error) {
+                log.warn("Failed to load pinned entries:", response.error);
+                return;
+            }
+            const entries = Array.isArray(response.result) ? response.result : [];
+            root.pinnedEntries = entries;
+            root.pinnedCount = entries.length;
+            root.updateCombined();
+        });
+    }
+
+    function restorePreservedSelection() {
+        if (root._preserveId === -1) {
+            return;
+        }
+        const keepId = root._preserveId;
+        root._preserveId = -1;
+        for (let i = 0; i < unpinnedEntries.length; i++) {
+            if (unpinnedEntries[i].id === keepId) {
+                selectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    function _refreshHead() {
+        const keepId = (selectedIndex >= 0 && selectedIndex < unpinnedEntries.length) ? unpinnedEntries[selectedIndex].id : -1;
+        _preserveId = keepId;
+        requestPage(true);
+    }
+
+    function flushStateUpdate() {
+        if (!pendingStateUpdate) {
+            return;
+        }
+        pendingStateUpdate = false;
+        stateUpdateDebounceTimer.stop();
+        _refreshHead();
+    }
+
+    function _flushStateUpdate() {
+        pendingStateUpdate = false;
+        _refreshHead();
     }
 
     function requestLauncherSearch(query, limit) {
@@ -197,9 +302,19 @@ Singleton {
         searchText = "";
         selectedIndex = 0;
         keyboardNavigationActive = false;
-        internalEntries = [];
-        clipboardEntries = [];
+        searchDebounce.stop();
+        stateUpdateDebounceTimer.stop();
+        _searchSeq++;
+        _pinnedSeq++;
+        isLoading = false;
+        hasMore = false;
+        totalCount = -1;
+        pendingStateUpdate = false;
+        _preserveId = -1;
+        pinnedEntries = [];
+        pinnedCount = 0;
         unpinnedEntries = [];
+        clipboardEntries = [];
     }
 
     function copyEntry(entry, closeCallback, textOnly) {
@@ -263,16 +378,7 @@ Singleton {
                 log.warn("Failed to delete entry:", response.error);
                 return;
             }
-            internalEntries = internalEntries.filter(e => e.id !== entry.id);
-            updateFilteredModel();
-            if (clipboardEntries.length === 0) {
-                keyboardNavigationActive = false;
-                selectedIndex = 0;
-                return;
-            }
-            if (selectedIndex >= clipboardEntries.length) {
-                selectedIndex = clipboardEntries.length - 1;
-            }
+            root.requestPage(true);
         });
     }
 
@@ -288,8 +394,7 @@ Singleton {
                     log.warn("Failed to delete entry:", response.error);
                     return;
                 }
-                internalEntries = internalEntries.filter(e => e.id !== entry.id);
-                updateFilteredModel();
+                root.requestPinned();
                 ToastService.showInfo(I18n.tr("Saved item deleted"));
             });
         }, function () {});
@@ -351,19 +456,23 @@ Singleton {
     }
 
     function clearFiltered() {
-        const ids = unpinnedEntries.map(entry => entry.id);
-        if (ids.length === 0) {
-            return;
+        const params = {};
+        const query = searchText.trim();
+        if (query.length > 0) {
+            params.query = query;
         }
-        DMSService.sendRequest("clipboard.deleteEntries", {
-            "ids": ids
-        }, function (response) {
+        if (activeFilter !== "all") {
+            params.entryType = activeFilter;
+        }
+        DMSService.sendRequest("clipboard.deleteMatching", params, function (response) {
             if (response.error) {
                 log.warn("Failed to clear filtered entries:", response.error);
                 return;
             }
-            refresh();
-            historyCleared();
+            const deleted = response.result?.deleted ?? 0;
+            root.requestPage(true);
+            root.historyCleared();
+            ToastService.showInfo(I18n.tr("Deleted %1 items").arg(deleted));
         });
     }
 
@@ -371,21 +480,11 @@ Singleton {
         return entry.preview || "";
     }
 
-    function getEntryType(entry) {
-        if (entry.isImage) {
-            return "image";
-        }
-        if (entry.size > longTextThreshold) {
-            return "long_text";
-        }
-        return "text";
-    }
-
     function getPinnedEntryByHash(entryHash) {
         if (!entryHash) {
             return null;
         }
-        return internalEntries.find(entry => entry.pinned && entry.hash === entryHash) || null;
+        return clipboardEntries.find(entry => entry.pinned && entry.hash === entryHash) || null;
     }
 
     function hashedPinnedEntry(entryHash) {
@@ -402,11 +501,12 @@ Singleton {
         target: DMSService
         enabled: root.refCount > 0
         function onClipboardStateUpdate(data) {
-            const newHistory = data.history || [];
-            internalEntries = newHistory;
-            pinnedEntries = newHistory.filter(e => e.pinned);
-            pinnedCount = pinnedEntries.length;
-            updateFilteredModel();
+            if (root.isLoading || root.filterActive) {
+                root.pendingStateUpdate = true;
+                return;
+            }
+            root.pendingStateUpdate = false;
+            stateUpdateDebounceTimer.restart();
         }
     }
 }

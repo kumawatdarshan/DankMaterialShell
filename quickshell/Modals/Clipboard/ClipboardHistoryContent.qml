@@ -51,6 +51,9 @@ FocusScope {
         }
         ClipboardService.selectedIndex = 0;
         ClipboardService.keyboardNavigationActive = true;
+        if (activeTab === "recents") {
+            ClipboardService.flushStateUpdate();
+        }
     }
     onPinnedCountChanged: {
         if (activeTab === "saved" && pinnedCount === 0) {
@@ -148,12 +151,18 @@ FocusScope {
             // The list is filtered, so clear what it shows and leave the modal
             // open on the filter the user is working through. A filter that
             // matches nothing must never fall back to clearing everything.
-            if (unpinnedEntries.length === 0) {
+            if (unpinnedEntries.length === 0 && !ClipboardService.hasMore) {
                 return;
             }
-            clearConfirmDialog.show(I18n.tr("Clear History?"), I18n.tr("This will delete the %1 entries matching the current filter. Pinned entries are kept.", "clipboard modal: clear confirmation while a search filter is active, %1 is the number of matching entries").arg(unpinnedEntries.length), function () {
-                clearFiltered();
-            }, function () {});
+            if (totalCount >= 0) {
+                clearConfirmDialog.show(I18n.tr("Clear History?"), I18n.tr("This will delete the %1 entries matching the current filter. Pinned entries are kept.", "clipboard modal: clear confirmation while a search filter is active, %1 is the number of matching entries").arg(totalCount), function () {
+                    clearFiltered();
+                }, function () {});
+            } else {
+                clearConfirmDialog.show(I18n.tr("Clear History?"), I18n.tr("This will delete the entries matching the current filter. Pinned entries are kept."), function () {
+                    clearFiltered();
+                }, function () {});
+            }
             return;
         }
         const hasPinned = pinnedCount > 0;
@@ -169,7 +178,16 @@ FocusScope {
     }
 
     function getEntryType(entry) {
-        return ClipboardService.getEntryType(entry);
+        if (!entry) {
+            return "text";
+        }
+        if (entry.isImage) {
+            return "image";
+        }
+        if (entry.size > ClipboardConstants.longTextThreshold) {
+            return "long_text";
+        }
+        return "text";
     }
 
     function updateFilteredModel() {

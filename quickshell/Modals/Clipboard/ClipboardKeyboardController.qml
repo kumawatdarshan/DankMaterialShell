@@ -20,6 +20,9 @@ QtObject {
         }
         ClipboardService.keyboardNavigationActive = true;
         ClipboardService.selectedIndex = Math.min(ClipboardService.selectedIndex + 1, entries.length - 1);
+        if (modal.activeTab !== "saved" && ClipboardService.selectedIndex >= entries.length - 5) {
+            ClipboardService.loadMore();
+        }
     }
 
     function selectPrevious() {

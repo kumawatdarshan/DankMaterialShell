@@ -90,7 +90,7 @@ Item {
         ClipboardHeader {
             id: header
             width: parent.width
-            recentsCount: modal.unpinnedEntries.length
+            recentsCount: modal.totalCount >= 0 ? modal.totalCount : modal.unpinnedEntries.length
             savedCount: modal.pinnedEntries.length
             showKeyboardHints: modal.showKeyboardHints
             activeTab: modal.activeTab
@@ -228,6 +228,28 @@ Item {
             onCurrentIndexChanged: {
                 if (clipboardContent.modal?.keyboardNavigationActive && currentIndex >= 0) {
                     ensureVisible(currentIndex);
+                }
+            }
+
+            onContentYChanged: {
+                if (modal.activeTab !== "recents" || ClipboardService.isLoading || !ClipboardService.hasMore) {
+                    return;
+                }
+                if (contentHeight - contentY - height < 500) {
+                    ClipboardService.loadMore();
+                }
+            }
+
+            footer: Item {
+                width: clipboardListView.width
+                height: (ClipboardService.isLoading || ClipboardService.hasMore) ? 28 : 0
+                visible: ClipboardService.isLoading || ClipboardService.hasMore
+
+                StyledText {
+                    anchors.centerIn: parent
+                    text: ClipboardService.isLoading ? I18n.tr("Loading...") : (ClipboardService.totalCount >= 0 ? I18n.tr("Showing %1 of %2").arg(clipboardContent.modal.unpinnedEntries.length).arg(ClipboardService.totalCount) : I18n.tr("Showing %1+").arg(clipboardContent.modal.unpinnedEntries.length))
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceVariantText
                 }
             }
 
