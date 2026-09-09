@@ -19,9 +19,8 @@ Singleton {
 
     // Normalized search index over the visible apps. Each entry keeps the
     // app reference plus pre-folded fields, laid out as
-    // [name, genericName, comment, id, ...keywords], with tokenized name
-    // words attached for boundary matching. Rebuilt whenever the visible
-    // set changes; null means stale.
+    // [name, genericName, comment, id, ...keywords]. Rebuilt whenever the
+    // visible set changes; null means stale.
     property var _searchIndex: null
 
     function invalidateVisibleApps() {
@@ -34,32 +33,6 @@ Singleton {
     property var _cachedDefaultFlatModel: []
     property bool _defaultCacheValid: false
     property int cacheVersion: 0
-
-    readonly property int maxResults: 10
-    readonly property int frecencySampleSize: 10
-
-    readonly property var timeBuckets: [
-        {
-            "maxDays": 4,
-            "weight": 100
-        },
-        {
-            "maxDays": 14,
-            "weight": 70
-        },
-        {
-            "maxDays": 31,
-            "weight": 50
-        },
-        {
-            "maxDays": 90,
-            "weight": 30
-        },
-        {
-            "maxDays": 99999,
-            "weight": 10
-        }
-    ]
 
     function refreshApplications() {
         applications = DesktopEntries.applications.values;
@@ -144,11 +117,7 @@ Singleton {
 
     function _ensureSearchIndex() {
         if (_searchIndex === null) {
-            const fields = ["name", "genericName", "comment", "id", "keywords"];
-            _searchIndex = SearchUtils.buildNormalizedIndex(getVisibleApplications(), fields).map(entry => {
-                entry.nameTokens = SearchUtils.tokenize(entry.folded[0]);
-                return entry;
-            });
+            _searchIndex = SearchUtils.buildNormalizedIndex(getVisibleApplications(), ["name", "genericName", "comment", "id", "keywords"]);
         }
         return _searchIndex;
     }
@@ -529,166 +498,12 @@ Singleton {
         refreshApplications();
     }
 
-    function tokenize(text) {
-        return text.toLowerCase().trim().split(/[\s\-_]+/).filter(w => w.length > 0);
-    }
-
-    function wordBoundaryMatch(text, query) {
-        const textWords = tokenize(text);
-        const queryWords = tokenize(query);
-
-        if (queryWords.length === 0)
-            return false;
-        if (queryWords.length > textWords.length)
-            return false;
-
-        for (var i = 0; i <= textWords.length - queryWords.length; i++) {
-            let allMatch = true;
-            for (var j = 0; j < queryWords.length; j++) {
-                if (!textWords[i + j].startsWith(queryWords[j])) {
-                    allMatch = false;
-                    break;
-                }
-            }
-            if (allMatch)
-                return true;
-        }
-        return false;
-    }
-
-    function levenshteinDistance(s1, s2) {
-        const len1 = s1.length;
-        const len2 = s2.length;
-        const matrix = [];
-
-        for (var i = 0; i <= len1; i++) {
-            matrix[i] = [i];
-        }
-        for (var j = 0; j <= len2; j++) {
-            matrix[0][j] = j;
-        }
-
-        for (var i = 1; i <= len1; i++) {
-            for (var j = 1; j <= len2; j++) {
-                const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-                matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
-            }
-        }
-        return matrix[len1][len2];
-    }
-
-    function fuzzyMatchScore(text, query) {
-        const queryLower = query.toLowerCase();
-        const maxDistance = query.length <= 2 ? 0 : query.length === 3 ? 1 : query.length <= 6 ? 2 : 3;
-
-        let bestScore = 0;
-
-        const distance = levenshteinDistance(text.toLowerCase(), queryLower);
-        if (distance <= maxDistance) {
-            const maxLen = Math.max(text.length, query.length);
-            bestScore = 1 - (distance / maxLen);
-        }
-
-        const words = tokenize(text);
-        for (const word of words) {
-            const wordDistance = levenshteinDistance(word, queryLower);
-            if (wordDistance <= maxDistance) {
-                const maxLen = Math.max(word.length, query.length);
-                const score = 1 - (wordDistance / maxLen);
-                bestScore = Math.max(bestScore, score);
-            }
-        }
-
-        return bestScore;
-    }
-
-    function calculateFrecency(app) {
-        const usageRanking = AppUsageHistoryData.appUsageRanking || {};
-        const appId = app.id || (app.execString || app.exec || "");
-        const idVariants = [appId, appId.replace(".desktop", ""), app.id, app.id ? app.id.replace(".desktop", "") : null].filter(id => id);
-
-        let usageData = null;
-        for (const variant of idVariants) {
-            if (usageRanking[variant]) {
-                usageData = usageRanking[variant];
-                break;
-            }
-        }
-
-        if (!usageData || !usageData.usageCount) {
-            return {
-                "frecency": 0,
-                "daysSinceUsed": 999999
-            };
-        }
-
-        const usageCount = usageData.usageCount || 0;
-        const lastUsed = usageData.lastUsed || 0;
-        const now = Date.now();
-        const daysSinceUsed = (now - lastUsed) / (1000 * 60 * 60 * 24);
-
-        let timeBucketWeight = 10;
-        for (const bucket of timeBuckets) {
-            if (daysSinceUsed <= bucket.maxDays) {
-                timeBucketWeight = bucket.weight;
-                break;
-            }
-        }
-
-        const contextBonus = 100;
-        const sampleSize = Math.min(usageCount, frecencySampleSize);
-        const frecency = (timeBucketWeight * contextBonus * sampleSize) / 100;
-
-        return {
-            "frecency": frecency,
-            "daysSinceUsed": daysSinceUsed
-        };
-    }
-
-    function topKScored(scored, k) {
-        const picked = [];
-        const used = new Array(scored.length).fill(false);
-        const limit = Math.min(k, scored.length);
-        for (let p = 0; p < limit; p++) {
-            let best = -1;
-            for (let i = 0; i < scored.length; i++) {
-                if (used[i]) {
-                    continue;
-                }
-                if (best === -1 || scored[i].score > scored[best].score) {
-                    best = i;
-                }
-            }
-            if (best === -1) {
-                break;
-            }
-            used[best] = true;
-            picked.push(scored[best]);
-        }
-        return picked;
-    }
-
-    // Token-level counterpart of wordBoundaryMatch operating on an already
-    // tokenized haystack and query. Same prefix-window semantics.
-    function wordBoundaryTokens(textTokens, queryTokens) {
-        if (queryTokens.length === 0 || queryTokens.length > textTokens.length) {
-            return false;
-        }
-        for (let i = 0; i <= textTokens.length - queryTokens.length; i++) {
-            let allMatch = true;
-            for (let j = 0; j < queryTokens.length; j++) {
-                if (textTokens[i + j].indexOf(queryTokens[j]) !== 0) {
-                    allMatch = false;
-                    break;
-                }
-            }
-            if (allMatch) {
-                return true;
-            }
-        }
-        return false;
-    }
-
+    // Filter-only gate over the normalized index: admits every visible app
+    // with a cheap substring hit on any folded field, unsorted and uncapped.
+    // Ranking (including typo-tolerant fuzzy) is Scorer.scoreItems' job in
+    // the Controller. Note this drops typo-only matches that share no
+    // substring with any field; exact, prefix, boundary, keyword, generic,
+    // id, and multi-word queries are unaffected.
     function searchApplications(query) {
         if (!query || query.length === 0)
             return getVisibleApplications();
@@ -696,108 +511,22 @@ Singleton {
             return [];
 
         const queryLower = query.toLowerCase().trim();
-        const queryTokens = tokenize(queryLower);
-        const scoredApps = [];
-        const results = [];
+        if (queryLower.length === 0)
+            return getVisibleApplications();
+
+        const matches = [];
         const index = _ensureSearchIndex();
 
         for (const entry of index) {
-            const app = entry.item;
-            const name = entry.folded[0];
-            const genericName = entry.folded[1];
-            const comment = entry.folded[2];
-            const id = entry.folded[3];
-            const keywords = entry.folded.slice(4);
-
-            let textScore = 0;
-            let matchType = "none";
-
-            if (name === queryLower) {
-                textScore = 10000;
-                matchType = "exact";
-            } else if (name.startsWith(queryLower)) {
-                textScore = 5000;
-                matchType = "prefix";
-            } else if (wordBoundaryTokens(entry.nameTokens, queryTokens)) {
-                textScore = 3000;
-                matchType = "word_boundary";
-            } else if (name.includes(queryLower)) {
-                textScore = 500;
-                matchType = "substring";
-            } else if (genericName && genericName.startsWith(queryLower)) {
-                textScore = 800;
-                matchType = "generic_prefix";
-            } else if (genericName && genericName.includes(queryLower)) {
-                textScore = 400;
-                matchType = "generic";
-            } else if (id && id.includes(queryLower)) {
-                textScore = 350;
-                matchType = "id";
-            }
-
-            if (matchType === "none" && keywords.length > 0) {
-                for (const keyword of keywords) {
-                    if (keyword.startsWith(queryLower)) {
-                        textScore = 300;
-                        matchType = "keyword_prefix";
-                        break;
-                    } else if (keyword.includes(queryLower)) {
-                        textScore = 150;
-                        matchType = "keyword";
-                        break;
-                    }
+            const fields = entry.folded;
+            for (let i = 0; i < fields.length; i++) {
+                if (fields[i].indexOf(queryLower) !== -1) {
+                    matches.push(entry.item);
+                    break;
                 }
             }
-
-            if (matchType === "none" && comment && comment.includes(queryLower)) {
-                textScore = 50;
-                matchType = "comment";
-            }
-
-            if (matchType === "none") {
-                const fuzzyScore = fuzzyMatchScore(name, queryLower);
-                if (fuzzyScore > 0) {
-                    textScore = fuzzyScore * 100;
-                    matchType = "fuzzy";
-                }
-            }
-
-            if (matchType !== "none") {
-                const frecencyData = calculateFrecency(app);
-
-                results.push({
-                    "app": app,
-                    "textScore": textScore,
-                    "frecency": frecencyData.frecency,
-                    "daysSinceUsed": frecencyData.daysSinceUsed,
-                    "matchType": matchType
-                });
-            }
         }
-
-        for (const result of results) {
-            const frecencyBonus = result.frecency > 0 ? Math.min(result.frecency, 2000) : 0;
-            const recencyBonus = result.daysSinceUsed < 1 ? 1500 : result.daysSinceUsed < 7 ? 1000 : result.daysSinceUsed < 30 ? 500 : 0;
-
-            const finalScore = result.textScore + frecencyBonus + recencyBonus;
-
-            scoredApps.push({
-                "app": result.app,
-                "score": finalScore
-            });
-        }
-
-        if (SessionData.searchAppActions) {
-            const actionResults = searchAppActions(queryLower, getVisibleApplications());
-            for (const actionResult of actionResults) {
-                scoredApps.push({
-                    app: actionResult.app,
-                    score: actionResult.score
-                });
-            }
-        }
-
-        return topKScored(scoredApps, maxResults).map(item => item.app);
+        return matches;
     }
 
     function searchAppActions(query, apps) {

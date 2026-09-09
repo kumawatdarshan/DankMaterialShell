@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Baseline benchmark for launcher search paths.
+// Benchmark for launcher search paths.
 //
 // Loads the REAL repo sources and scores a deterministic synthetic corpus:
 // - Modals/DankLauncherV2/Scorer.js (verbatim, pragma stripped)
-// - Pure fns extracted from Services/AppSearchService.qml by name
-//   (tokenize, wordBoundaryMatch, levenshteinDistance, fuzzyMatchScore).
-//   Extraction fails loudly if those functions are renamed.
+// - Common/SearchUtils.js (verbatim, pragma stripped) for the filter gate
+//
+// "scorer/full" cases score the whole corpus (pre-gate control).
+// "pipeline" cases mirror production since PR7: substring gate over the
+// normalized index, then Scorer.scoreItems on the gated subset, top 10.
 //
 // Numbers are V8-relative (QML runs QJSEngine), so compare runs against each
 // other, not against Go benchmarks or wall-clock budgets.
@@ -40,53 +42,30 @@ function mulberry32(seed) {
     };
 }
 
-function loadScorer() {
-    const src = readFileSync(path.join(QS, "Modals/DankLauncherV2/Scorer.js"), "utf8")
+function loadLib(relpath, api, filename) {
+    const src = readFileSync(path.join(QS, relpath), "utf8")
         .split("\n")
         .filter((l) => !/^\s*\.pragma/.test(l) && !/^\s*\.import/.test(l))
         .join("\n");
     const box = {};
-    vm.runInNewContext(
-        src + "\nthis.__api = { score, scoreItems, fuzzyScore, calculateTextScore, tokenize, hasWordBoundaryMatch, levenshteinDistance };",
-        box,
-        { filename: "Scorer.js" },
+    vm.runInNewContext(src + `\nthis.__api = { ${api} };`, box, { filename });
+    return box.__api;
+}
+
+function loadScorer() {
+    return loadLib(
+        "Modals/DankLauncherV2/Scorer.js",
+        "score, scoreItems, fuzzyScore, calculateTextScore, tokenize, hasWordBoundaryMatch, levenshteinDistance",
+        "Scorer.js",
     );
-    return box.__api;
 }
 
-function extractQmlFunction(src, file, name) {
-    const marker = `function ${name}(`;
-    const start = src.indexOf(marker);
-    if (start === -1) throw new Error(`${file}: function ${name}() not found, update bench`);
-    const open = src.indexOf("{", start);
-    let depth = 0, i = open, str = null, line = false, block = false;
-    for (; i < src.length; i++) {
-        const c = src[i], n = src[i + 1];
-        if (str) {
-            if (c === "\\") { i++; continue; }
-            if (c === str) str = null;
-            continue;
-        }
-        if (line) { if (c === "\n") line = false; continue; }
-        if (block) { if (c === "*" && n === "/") { block = false; i++; } continue; }
-        if (c === '"' || c === "'" || c === "`") { str = c; continue; }
-        if (c === "/" && n === "/") { line = true; i++; continue; }
-        if (c === "/" && n === "*") { block = true; i++; continue; }
-        if (c === "{") depth++;
-        if (c === "}") { depth--; if (depth === 0) break; }
-    }
-    if (depth !== 0) throw new Error(`${file}: unbalanced braces in ${name}(), update bench`);
-    return src.slice(start, i + 1);
-}
-
-function loadAppServicePure() {
-    const file = "Services/AppSearchService.qml";
-    const src = readFileSync(path.join(QS, file), "utf8");
-    const names = ["tokenize", "wordBoundaryMatch", "levenshteinDistance", "fuzzyMatchScore"];
-    const combined = names.map((n) => extractQmlFunction(src, file, n)).join("\n");
-    const box = {};
-    vm.runInNewContext(combined + "\nthis.__api = { tokenize, wordBoundaryMatch, levenshteinDistance, fuzzyMatchScore };", box, { filename: "AppSearchService-pure" });
-    return box.__api;
+function loadSearchUtils() {
+    return loadLib(
+        "Common/SearchUtils.js",
+        "fold, tokenize, foldAndTokenize, buildNormalizedIndex, score",
+        "SearchUtils.js",
+    );
 }
 
 const BASE_NAMES = [
@@ -150,18 +129,43 @@ function measure(label, fn) {
 
 function main() {
     const scorer = loadScorer();
-    const appSvc = loadAppServicePure();
+    const SU = loadSearchUtils();
     const items = buildCorpus(CORPUS);
-    const longName = items[0].name + " " + items[0].subtitle;
+    const index = SU.buildNormalizedIndex(items, [
+        "name",
+        "subtitle",
+        "keywords",
+        (item) => item.data.genericName,
+        "id",
+    ]);
+
+    // Production pipeline since PR7: cheap gate, then ranked scoring on the
+    // gated subset, top 10.
+    const pipeline = (query) => {
+        const q = query.toLowerCase().trim();
+        if (!q) return items.slice(0, 10);
+        const gated = [];
+        for (const entry of index) {
+            const fields = entry.folded;
+            for (let i = 0; i < fields.length; i++) {
+                if (fields[i].includes(q)) {
+                    gated.push(entry.item);
+                    break;
+                }
+            }
+        }
+        return scorer.scoreItems(gated, query, frecencyStub).slice(0, 10);
+    };
 
     const cases = [
-        ["scorer/scoreItems empty query", () => scorer.scoreItems(items, "", frecencyStub)],
-        ["scorer/scoreItems prefix 'term'", () => scorer.scoreItems(items, "term", frecencyStub)],
-        ["scorer/scoreItems multiword 'web brow'", () => scorer.scoreItems(items, "web brow", frecencyStub)],
-        ["scorer/scoreItems nomatch+fuzzy 'zxqv'", () => scorer.scoreItems(items, "zxqv", frecencyStub)],
-        ["appsvc/fuzzyMatchScore worst-case", () => appSvc.fuzzyMatchScore(longName, "zxqv")],
-        ["appsvc/fuzzyMatchScore hit", () => appSvc.fuzzyMatchScore("Terminal Emulator", "term")],
-        ["appsvc/wordBoundaryMatch", () => appSvc.wordBoundaryMatch("Firefox Web Browser", "web brow")],
+        ["scorer/full empty query", () => scorer.scoreItems(items, "", frecencyStub)],
+        ["scorer/full prefix 'term'", () => scorer.scoreItems(items, "term", frecencyStub)],
+        ["scorer/full multiword 'web brow'", () => scorer.scoreItems(items, "web brow", frecencyStub)],
+        ["scorer/full nomatch+fuzzy 'zxqv'", () => scorer.scoreItems(items, "zxqv", frecencyStub)],
+        ["pipeline prefix 'term'", () => pipeline("term")],
+        ["pipeline multiword 'web brow'", () => pipeline("web brow")],
+        ["pipeline nomatch 'zxqv'", () => pipeline("zxqv")],
+        ["pipeline typo 'termnal'", () => pipeline("termnal")],
     ];
 
     const rows = cases.map(([label, fn]) => ({ ...measure(label, fn), corpus: CORPUS }));
