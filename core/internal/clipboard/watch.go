@@ -32,11 +32,20 @@ func WatchAll(ctx context.Context, callback func(data []byte, mimeType string, a
 	defer device.Destroy()
 
 	offerMimeTypes := make(map[*ext_data_control.ExtDataControlOfferV1][]string)
+	var lastOffer *ext_data_control.ExtDataControlOfferV1
 
 	device.SetDataOfferHandler(func(e ext_data_control.ExtDataControlDeviceV1DataOfferEvent) {
 		if e.Id == nil {
 			return
 		}
+		// A new offer supersedes the previous one, which the compositor has
+		// invalidated. Drop it so the map cannot grow without bound, and
+		// destroy the client-side object as the protocol requires.
+		if lastOffer != nil && lastOffer != e.Id {
+			delete(offerMimeTypes, lastOffer)
+			_ = lastOffer.Destroy()
+		}
+		lastOffer = e.Id
 		offerMimeTypes[e.Id] = nil
 		e.Id.SetOfferHandler(func(me ext_data_control.ExtDataControlOfferV1OfferEvent) {
 			offerMimeTypes[e.Id] = append(offerMimeTypes[e.Id], me.MimeType)
@@ -45,6 +54,11 @@ func WatchAll(ctx context.Context, callback func(data []byte, mimeType string, a
 
 	device.SetSelectionHandler(func(e ext_data_control.ExtDataControlDeviceV1SelectionEvent) {
 		if e.Id == nil {
+			// Selection cleared: the tracked offer is dead server-side.
+			if lastOffer != nil {
+				delete(offerMimeTypes, lastOffer)
+				lastOffer = nil
+			}
 			return
 		}
 

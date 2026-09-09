@@ -132,11 +132,9 @@ var clipSearchCmd = &cobra.Command{
 }
 
 var (
-	clipSearchLimit    int
-	clipSearchOffset   int
-	clipSearchMimeType string
-	clipSearchImages   bool
-	clipSearchText     bool
+	clipSearchLimit  int
+	clipSearchImages bool
+	clipSearchText   bool
 )
 
 var clipConfigCmd = &cobra.Command{
@@ -208,8 +206,6 @@ func init() {
 	clipGetCmd.Flags().BoolVarP(&clipGetCopy, "copy", "C", false, "Copy entry to clipboard")
 
 	clipSearchCmd.Flags().IntVarP(&clipSearchLimit, "limit", "l", 50, "Max results")
-	clipSearchCmd.Flags().IntVarP(&clipSearchOffset, "offset", "o", 0, "Result offset")
-	clipSearchCmd.Flags().StringVarP(&clipSearchMimeType, "mime", "m", "", "Filter by MIME type")
 	clipSearchCmd.Flags().BoolVar(&clipSearchImages, "images", false, "Only images")
 	clipSearchCmd.Flags().BoolVar(&clipSearchText, "text", false, "Only text")
 	clipSearchCmd.Flags().BoolVar(&clipJSONOutput, "json", false, "Output as JSON")
@@ -429,22 +425,98 @@ func runCommand(args []string, stdin []byte) {
 	cmd.Run()
 }
 
-func runClipHistory(cmd *cobra.Command, args []string) {
-	req := models.Request{
-		ID:     1,
-		Method: "clipboard.getHistory",
+func fetchSearchPage(limit int, beforeID *uint64, query, entryType string) ([]any, bool, error) {
+	params := map[string]any{"limit": limit}
+	if query != "" {
+		params["query"] = query
 	}
-
+	if entryType != "" {
+		params["entryType"] = entryType
+	}
+	if beforeID != nil {
+		params["beforeId"] = *beforeID
+	}
+	req := models.Request{ID: 1, Method: "clipboard.search", Params: params}
 	resp, err := sendServerRequest(req)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.Error != "" {
+		return nil, false, fmt.Errorf("%s", resp.Error)
+	}
+	if resp.Result == nil {
+		return nil, false, nil
+	}
+	result, ok := (*resp.Result).(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("invalid response format")
+	}
+	entries, _ := result["entries"].([]any)
+	hasMore, _ := result["hasMore"].(bool)
+	return entries, hasMore, nil
+}
+
+func lastEntryID(entries []any) (uint64, bool) {
+	if len(entries) == 0 {
+		return 0, false
+	}
+	entry, ok := entries[len(entries)-1].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	id, ok := entry["id"].(float64)
+	if !ok {
+		return 0, false
+	}
+	return uint64(id), true
+}
+
+func collectSearchPages(fetch func(beforeID *uint64) ([]any, bool, error)) ([]any, error) {
+	var all []any
+	var beforeID *uint64
+	for {
+		entries, hasMore, err := fetch(beforeID)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 {
+			break
+		}
+		all = append(all, entries...)
+		if !hasMore {
+			break
+		}
+		id, ok := lastEntryID(entries)
+		if !ok {
+			break
+		}
+		beforeID = &id
+	}
+	return all, nil
+}
+
+func buildSearchParams(query string, limit int, images, text bool) map[string]any {
+	params := map[string]any{"limit": limit}
+	if query != "" {
+		params["query"] = query
+	}
+	if images {
+		params["entryType"] = "image"
+	} else if text {
+		params["entryType"] = "text"
+	}
+	return params
+}
+
+func runClipHistory(cmd *cobra.Command, args []string) {
+	all, err := collectSearchPages(func(beforeID *uint64) ([]any, bool, error) {
+		return fetchSearchPage(500, beforeID, "", "")
+	})
 	if err != nil {
 		log.Fatalf("Failed to get clipboard history: %v", err)
 	}
 
-	if resp.Error != "" {
-		log.Fatalf("Error: %s", resp.Error)
-	}
-
-	if resp.Result == nil {
+	if len(all) == 0 {
 		if clipJSONOutput {
 			fmt.Println("[]")
 		} else {
@@ -453,26 +525,16 @@ func runClipHistory(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	historyList, ok := (*resp.Result).([]any)
-	if !ok {
-		log.Fatal("Invalid response format")
-	}
-
 	if clipJSONOutput {
-		out, _ := json.MarshalIndent(historyList, "", "  ")
+		out, _ := json.MarshalIndent(all, "", "  ")
 		fmt.Println(string(out))
-		return
-	}
-
-	if len(historyList) == 0 {
-		fmt.Println("No clipboard history")
 		return
 	}
 
 	fmt.Println("Clipboard History:")
 	fmt.Println()
 
-	for _, item := range historyList {
+	for _, item := range all {
 		entry, ok := item.(map[string]any)
 		if !ok {
 			continue
@@ -604,27 +666,14 @@ func runClipClear(cmd *cobra.Command, args []string) {
 }
 
 func runClipSearch(cmd *cobra.Command, args []string) {
-	params := map[string]any{
-		"limit":  clipSearchLimit,
-		"offset": clipSearchOffset,
-	}
-
+	query := ""
 	if len(args) > 0 {
-		params["query"] = args[0]
+		query = args[0]
 	}
-	if clipSearchMimeType != "" {
-		params["mimeType"] = clipSearchMimeType
-	}
-	if clipSearchImages {
-		params["isImage"] = true
-	} else if clipSearchText {
-		params["isImage"] = false
-	}
-
 	req := models.Request{
 		ID:     1,
 		Method: "clipboard.search",
-		Params: params,
+		Params: buildSearchParams(query, clipSearchLimit, clipSearchImages, clipSearchText),
 	}
 
 	resp, err := sendServerRequest(req)
@@ -652,15 +701,18 @@ func runClipSearch(cmd *cobra.Command, args []string) {
 	}
 
 	entries, _ := result["entries"].([]any)
-	total := int(result["total"].(float64))
-	hasMore := result["hasMore"].(bool)
+	hasMore := result["hasMore"] == true
 
 	if len(entries) == 0 {
 		fmt.Println("No results found")
 		return
 	}
 
-	fmt.Printf("Results: %d of %d\n\n", len(entries), total)
+	if total, ok := result["total"].(float64); ok && result["totalKnown"] == true {
+		fmt.Printf("Results: %d of %d\n\n", len(entries), int(total))
+	} else {
+		fmt.Printf("Results: %d\n\n", len(entries))
+	}
 
 	for _, item := range entries {
 		entry, ok := item.(map[string]any)
@@ -683,7 +735,7 @@ func runClipSearch(cmd *cobra.Command, args []string) {
 	}
 
 	if hasMore {
-		fmt.Printf("Use --offset %d to see more results\n", clipSearchOffset+clipSearchLimit)
+		fmt.Println("More results available (use a larger --limit)")
 	}
 }
 
@@ -761,23 +813,17 @@ func runClipConfigSet(cmd *cobra.Command, args []string) {
 }
 
 func runClipExport(cmd *cobra.Command, args []string) {
-	req := models.Request{
-		ID:     1,
-		Method: "clipboard.getHistory",
-	}
-
-	resp, err := sendServerRequest(req)
+	all, err := collectSearchPages(func(beforeID *uint64) ([]any, bool, error) {
+		return fetchSearchPage(500, beforeID, "", "")
+	})
 	if err != nil {
 		log.Fatalf("Failed to get clipboard history: %v", err)
 	}
-	if resp.Error != "" {
-		log.Fatalf("Error: %s", resp.Error)
-	}
-	if resp.Result == nil {
+	if len(all) == 0 {
 		log.Fatal("No clipboard history")
 	}
 
-	out, err := json.MarshalIndent(resp.Result, "", "  ")
+	out, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
 		log.Fatalf("Failed to marshal: %v", err)
 	}
@@ -851,28 +897,32 @@ func runClipMigrate(cmd *cobra.Command, args []string) {
 	}
 	defer db.Close()
 
-	var migrated int
+	var items []clipboard.BatchItem
 	err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("b"))
 		if b == nil {
 			return fmt.Errorf("cliphist bucket not found")
 		}
 
+		maxSize := int64(clipboard.DefaultStoreConfig().MaxEntrySize)
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			if len(v) == 0 {
 				continue
 			}
-
-			mimeType := detectMimeType(v)
-			if err := clipboard.Store(v, mimeType); err != nil {
-				log.Errorf("Failed to store entry %d: %v", btoi(k), err)
+			if int64(len(v)) > maxSize {
+				log.Errorf("Skipping oversized entry %d: %d > %d", btoi(k), len(v), maxSize)
 				continue
 			}
-			migrated++
+			items = append(items, clipboard.BatchItem{Data: append([]byte(nil), v...), MimeType: detectMimeType(v)})
 		}
 		return nil
 	})
+	if err != nil {
+		log.Fatalf("Migration failed: %v", err)
+	}
+
+	migrated, err := clipboard.StoreBatch(items, clipboard.DefaultStoreConfig())
 	if err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}

@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 
 	clipboardstore "github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
 	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
 	"github.com/AvengeMedia/dankgo/ipc/params"
 )
@@ -17,8 +15,6 @@ func HandleRequest(conn *models.Conn, req models.Request, m *Manager) {
 	switch req.Method {
 	case "clipboard.getState":
 		handleGetState(conn, req, m)
-	case "clipboard.getHistory":
-		handleGetHistory(conn, req, m)
 	case "clipboard.getEntry":
 		handleGetEntry(conn, req, m)
 	case "clipboard.deleteEntry":
@@ -66,19 +62,6 @@ func HandleRequest(conn *models.Conn, req models.Request, m *Manager) {
 
 func handleGetState(conn *models.Conn, req models.Request, m *Manager) {
 	models.Respond(conn, req.ID, m.GetState())
-}
-
-var getHistoryWarnOnce sync.Once
-
-func handleGetHistory(conn *models.Conn, req models.Request, m *Manager) {
-	getHistoryWarnOnce.Do(func() {
-		log.Warnf("clipboard.getHistory is deprecated, use clipboard.search")
-	})
-	history := m.GetHistory()
-	for i := range history {
-		history[i].Data = nil
-	}
-	models.Respond(conn, req.ID, history)
 }
 
 func handleGetEntry(conn *models.Conn, req models.Request, m *Manager) {

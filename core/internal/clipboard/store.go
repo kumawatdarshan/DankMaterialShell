@@ -47,6 +47,98 @@ func Store(data []byte, mimeType string) error {
 	return StoreWithConfig(data, mimeType, DefaultStoreConfig())
 }
 
+type BatchItem struct {
+	Data     []byte
+	MimeType string
+}
+
+func buildEntry(data []byte, mimeType string) Entry {
+	entry := Entry{
+		Data:      data,
+		MimeType:  mimeType,
+		Size:      len(data),
+		Timestamp: time.Now(),
+		IsImage:   IsImageMimeType(mimeType),
+		Hash:      computeHash(data),
+	}
+
+	switch {
+	case entry.IsImage:
+		entry.Preview = imagePreview(data, mimeType)
+	default:
+		entry.Preview = textPreview(data)
+	}
+
+	return entry
+}
+
+func putEntryInTx(b *bolt.Bucket, entry Entry, maxHistory int) error {
+	if err := deduplicateInTx(b, entry.Hash); err != nil {
+		return err
+	}
+
+	id, err := b.NextSequence()
+	if err != nil {
+		return err
+	}
+	entry.ID = id
+
+	encoded, err := encodeEntry(entry)
+	if err != nil {
+		return err
+	}
+
+	if err := b.Put(itob(id), encoded); err != nil {
+		return err
+	}
+
+	return trimLengthInTx(b, maxHistory)
+}
+
+func StoreBatch(items []BatchItem, cfg StoreConfig) (stored int, err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stored = 0
+		err = fmt.Errorf("clipboard db panic: %v", r)
+	}()
+
+	dbPath, err := GetDBPath()
+	if err != nil {
+		return 0, fmt.Errorf("get db path: %w", err)
+	}
+
+	db, err := bolt.Open(dbPath, 0o644, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		return 0, fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("clipboard"))
+		if err != nil {
+			return err
+		}
+
+		for _, item := range items {
+			if len(item.Data) == 0 || int64(len(item.Data)) > cfg.MaxEntrySize {
+				continue
+			}
+			if err := putEntryInTx(b, buildEntry(item.Data, item.MimeType), cfg.MaxHistory); err != nil {
+				return err
+			}
+			stored++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return stored, nil
+}
+
 func StoreWithConfig(data []byte, mimeType string, cfg StoreConfig) (err error) {
 	defer func() {
 		r := recover()
@@ -74,21 +166,7 @@ func StoreWithConfig(data []byte, mimeType string, cfg StoreConfig) (err error) 
 	}
 	defer db.Close()
 
-	entry := Entry{
-		Data:      data,
-		MimeType:  mimeType,
-		Size:      len(data),
-		Timestamp: time.Now(),
-		IsImage:   IsImageMimeType(mimeType),
-		Hash:      computeHash(data),
-	}
-
-	switch {
-	case entry.IsImage:
-		entry.Preview = imagePreview(data, mimeType)
-	default:
-		entry.Preview = textPreview(data)
-	}
+	entry := buildEntry(data, mimeType)
 
 	return db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists([]byte("clipboard"))
@@ -96,26 +174,7 @@ func StoreWithConfig(data []byte, mimeType string, cfg StoreConfig) (err error) 
 			return err
 		}
 
-		if err := deduplicateInTx(b, entry.Hash); err != nil {
-			return err
-		}
-
-		id, err := b.NextSequence()
-		if err != nil {
-			return err
-		}
-		entry.ID = id
-
-		encoded, err := encodeEntry(entry)
-		if err != nil {
-			return err
-		}
-
-		if err := b.Put(itob(id), encoded); err != nil {
-			return err
-		}
-
-		return trimLengthInTx(b, cfg.MaxHistory)
+		return putEntryInTx(b, entry, cfg.MaxHistory)
 	})
 }
 
