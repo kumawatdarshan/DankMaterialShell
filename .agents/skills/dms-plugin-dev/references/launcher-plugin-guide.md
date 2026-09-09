@@ -146,26 +146,37 @@ function executeItem(item) {
 
 The `query` parameter in `getItems()` contains the user's search text (without the trigger prefix).
 
-```qml
-function getItems(query) {
-    const allItems = [
-        { name: "Calculator", icon: "material:calculate",
-          comment: "Open calculator", action: "exec:gnome-calculator",
-          categories: ["Tools"] },
-        { name: "Terminal", icon: "material:terminal",
-          comment: "Open terminal", action: "exec:alacritty",
-          categories: ["Tools"] }
-    ]
+Fold searchable fields once (rebuild the index when the item list changes)
+instead of calling `toLowerCase()` per item per keystroke:
 
+```qml
+property var _searchIndex: []
+
+function rebuildSearchIndex() {
+    _searchIndex = allItems.map(item => ({
+        item: item,
+        folded: [
+            (item.name || "").toLowerCase(),
+            (item.comment || "").toLowerCase()
+        ]
+    }))
+}
+
+function getItems(query) {
     if (!query || query.length === 0) return allItems
 
     const q = query.toLowerCase()
-    return allItems.filter(item =>
-        item.name.toLowerCase().includes(q) ||
-        item.comment.toLowerCase().includes(q)
-    )
+    return _searchIndex.filter(entry =>
+        entry.folded[0].includes(q) ||
+        entry.folded[1].includes(q)
+    ).map(entry => entry.item)
 }
 ```
+
+In-tree code should use `qs.Common/SearchUtils.js` (`import "../../Common/SearchUtils.js" as SearchUtils`)
+instead of vendoring this pattern: it exports `foldAndTokenize`,
+`buildNormalizedIndex`, and a tiered `score()` over pre-folded fields.
+Ranked or typo-tolerant scoring belongs in the launcher's `Scorer.js`.
 
 ## Context Menu Actions
 
@@ -286,8 +297,8 @@ Item {
         if (!query) return commands
         const q = query.toLowerCase()
         return commands.filter(c =>
-            c.name.toLowerCase().includes(q) ||
-            c.comment.toLowerCase().includes(q)
+            (c.name || "").toLowerCase().includes(q) ||
+            (c.comment || "").toLowerCase().includes(q)
         )
     }
 

@@ -914,6 +914,11 @@ Displays a live overview of all workspaces across all monitors with window previ
 - **Click outside or press Escape** - Close the overview
 
 ### Modal Examples
+
+The core clipboard store API (history search with cursor pagination,
+`totalKnown`/`hasMore` semantics, filtered delete) is documented
+separately in [CLIPBOARD.md](./CLIPBOARD.md).
+
 ```bash
 # Open application launcher
 dms ipc call spotlight toggle

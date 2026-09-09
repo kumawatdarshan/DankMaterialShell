@@ -21,14 +21,36 @@ Item {
         }
     ]
 
+    // Search pattern: fold fields once here, score per keystroke without
+    // allocating lowercase copies in the filter loop. Call
+    // rebuildSearchIndex() again if allItems changes at runtime. In-tree
+    // code should use qs.Common/SearchUtils.js instead of vendoring this;
+    // it exports foldAndTokenize/buildNormalizedIndex/score with the same
+    // semantics.
+    property var _searchIndex: []
+
+    function rebuildSearchIndex() {
+        _searchIndex = allItems.map(function (item) {
+            return {
+                item: item,
+                folded: [
+                    (item.name || "").toLowerCase(),
+                    (item.comment || "").toLowerCase(),
+                    (item.keywords || []).map(function (k) { return (k || "").toLowerCase(); }).join(" ")
+                ]
+            };
+        });
+    }
+
     function getItems(query) {
         if (!query || query.length === 0) return allItems
 
         var q = query.toLowerCase()
-        return allItems.filter(function(item) {
-            return item.name.toLowerCase().includes(q) ||
-                   item.comment.toLowerCase().includes(q)
-        })
+        return _searchIndex.filter(function (entry) {
+            return entry.folded[0].includes(q) ||
+                   entry.folded[1].includes(q) ||
+                   entry.folded[2].includes(q)
+        }).map(function (entry) { return entry.item; })
     }
 
     function executeItem(item) {
@@ -52,6 +74,7 @@ Item {
     }
 
     Component.onCompleted: {
+        rebuildSearchIndex();
         if (pluginService) {
             trigger = pluginService.loadPluginData("myLauncher", "trigger", "#")
         }
