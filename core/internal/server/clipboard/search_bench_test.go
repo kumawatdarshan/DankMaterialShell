@@ -171,3 +171,25 @@ func BenchmarkDecodeEntryMeta(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkGetHistory(b *testing.B) {
+	m := newBenchManager(b, benchEntryCount)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		history := m.GetHistory()
+		if len(history) != benchEntryCount {
+			b.Fatalf("expected %d entries, got %d", benchEntryCount, len(history))
+		}
+	}
+}
+
+func BenchmarkUpdateState(b *testing.B) {
+	m := newBenchManager(b, benchEntryCount)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.updateState()
+		if len(m.GetState().History) != stateHeadLimit {
+			b.Fatalf("expected broadcast capped at %d", stateHeadLimit)
+		}
+	}
+}
