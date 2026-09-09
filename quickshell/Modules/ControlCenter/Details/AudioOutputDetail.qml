@@ -166,13 +166,10 @@ Rectangle {
 
             Repeater {
                 model: ScriptModel {
+                    objectProp: "name"
                     values: {
                         const hidden = SessionData.hiddenOutputDeviceNames ?? [];
-                        const nodes = Pipewire.nodes.values.filter(node => {
-                            if (!node.audio || !node.isSink || node.isStream)
-                                return false;
-                            return !hidden.includes(node.name);
-                        });
+                        const nodes = AudioService.typedSinks.filter(node => !node.isStream && !hidden.includes(node.name));
                         const pinnedList = audioContent.getPinnedOutputs();
 
                         let sorted = [...nodes];

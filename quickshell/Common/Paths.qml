@@ -26,7 +26,40 @@ Singleton {
     property var desktopIconResolver: null
     property var trashHandler: null
 
-    Component.onCompleted: mkdir(imagecache)
+    // Pre-compiled appId substitutions: regex patterns compile once here
+    // instead of per moddedAppId() call (window focus, dock lookups).
+    // Invalid patterns are skipped with a warning instead of throwing on
+    // every lookup.
+    property var _compiledSubs: []
+
+    function rebuildSubstitutions() {
+        _compiledSubs = (SettingsData.appIdSubstitutions || []).map(sub => {
+            if (sub.type !== "regex")
+                return sub;
+            try {
+                return {
+                    type: "regex",
+                    re: new RegExp(sub.pattern),
+                    replacement: sub.replacement
+                };
+            } catch (e) {
+                log.warn("ignoring invalid appId regex:", sub.pattern);
+                return null;
+            }
+        }).filter(sub => sub !== null);
+    }
+
+    Connections {
+        target: SettingsData
+        function onAppIdSubstitutionsChanged() {
+            root.rebuildSubstitutions();
+        }
+    }
+
+    Component.onCompleted: {
+        mkdir(imagecache);
+        rebuildSubstitutions();
+    }
 
     function stringify(path: url): string {
         const raw = path.toString();
@@ -69,7 +102,7 @@ Singleton {
     }
 
     function moddedAppId(appId: string): string {
-        const subs = SettingsData.appIdSubstitutions || [];
+        const subs = _compiledSubs;
         for (let i = 0; i < subs.length; i++) {
             const sub = subs[i];
             if (sub.type === "exact" && appId === sub.pattern) {
@@ -77,7 +110,7 @@ Singleton {
             } else if (sub.type === "contains" && appId.includes(sub.pattern)) {
                 return sub.replacement;
             } else if (sub.type === "regex") {
-                const match = appId.match(new RegExp(sub.pattern));
+                const match = appId.match(sub.re);
                 if (match) {
                     return sub.replacement.replace(/\$(\d+)/g, (_, n) => match[n] || "");
                 }
