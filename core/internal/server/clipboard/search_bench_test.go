@@ -144,9 +144,8 @@ func BenchmarkStoreEntry_Into1k(b *testing.B) {
 	m := newBenchManager(b, 1000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		e := benchEntry(1000000 + i)
-		e.ID = 0
-		if err := m.storeEntry(e); err != nil {
+		data := []byte(fmt.Sprintf("bench-store-%08d with enough words to look like a real entry", i))
+		if err := m.StoreData(data, "text/plain;charset=utf-8"); err != nil {
 			b.Fatal(err)
 		}
 	}

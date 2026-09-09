@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -149,6 +150,8 @@ type Manager struct {
 
 	state      *State
 	stateMutex sync.RWMutex
+
+	unpinnedCount atomic.Int64
 
 	subscribers map[string]chan State
 	subMutex    sync.RWMutex

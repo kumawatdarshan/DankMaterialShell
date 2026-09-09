@@ -37,6 +37,10 @@ import (
 
 var errEntryNotFound = errors.New("entry not found")
 
+// stateHeadLimit caps how many history entries updateState keeps in the
+// broadcast State. Full history stays available through GetHistory/Search.
+const stateHeadLimit = 50
+
 // These mime types won't be stored in history
 var sensitiveMimeTypes = []string{
 	"x-kde-passwordManagerHint",
@@ -97,6 +101,8 @@ func NewManager(wlCtx wlcontext.WaylandContext, config Config) (*Manager, error)
 			}
 		}
 	}
+
+	m.initCache()
 
 	m.alive = true
 	m.updateState()
@@ -511,40 +517,41 @@ func (m *Manager) storeClipboardEntry(data []byte, mimeType string, altData []by
 }
 
 func (m *Manager) storeEntry(entry Entry) error {
-	if m.db == nil {
-		return fmt.Errorf("database not available")
-	}
-
+	cfg := m.getConfig()
 	entry.Hash = computeHash(entry.Data)
 
-	return m.dbUpdate(func(tx *bolt.Tx) error {
+	return m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return fmt.Errorf("clipboard bucket missing")
+			return false, 0, fmt.Errorf("clipboard bucket missing")
 		}
 
-		if _, err := dedupByHash(b, entry.Hash); err != nil {
-			return err
+		dedup, err := dedupByHash(b, entry.Hash)
+		if err != nil {
+			return false, 0, err
 		}
 
 		id, err := b.NextSequence()
 		if err != nil {
-			return err
+			return false, 0, err
 		}
 
 		entry.ID = id
 
 		encoded, err := encodeEntry(entry)
 		if err != nil {
-			return err
+			return false, 0, err
 		}
 
 		if err := b.Put(itob(id), encoded); err != nil {
-			return err
+			return false, 0, err
 		}
 
-		_, err = trimUnpinned(b, m.config.MaxHistory)
-		return err
+		trimmed, err := trimUnpinned(b, cfg.MaxHistory)
+		if err != nil {
+			return false, 0, err
+		}
+		return true, 1 - dedup - trimmed, nil
 	})
 }
 
@@ -704,8 +711,67 @@ func sizeStr(size int) string {
 	return fmt.Sprintf("%.0f %s", fsize, units[i])
 }
 
+// withMutation is the sole owner of row-counting writes. fn runs inside a
+// single bbolt write transaction and reports whether anything changed plus
+// the net unpinned-row delta. The transaction commits first; only then are
+// the counter adjusted and subscribers notified, keeping write transactions
+// short and re-entrancy free.
+func (m *Manager) withMutation(fn func(tx *bolt.Tx) (bool, int, error)) error {
+	if m.db == nil {
+		return fmt.Errorf("database not available")
+	}
+	var mutated bool
+	var delta int
+	err := m.dbUpdate(func(tx *bolt.Tx) error {
+		var err error
+		mutated, delta, err = fn(tx)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if delta != 0 {
+		m.unpinnedCount.Add(int64(delta))
+	}
+	if mutated {
+		m.updateState()
+		m.notifySubscribers()
+	}
+	return nil
+}
+
+func (m *Manager) initCache() {
+	if m.db == nil {
+		return
+	}
+	var count int64
+	_ = m.dbView(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("clipboard"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for _, v := c.First(); v != nil; _, v = c.Next() {
+			pinned := false
+			if h, ok := parseEntryHeader(v); ok {
+				pinned = h.pinned
+			} else if e, err := decodeEntryMeta(v); err == nil {
+				pinned = e.Pinned
+			}
+			if !pinned {
+				count++
+			}
+		}
+		return nil
+	})
+	m.unpinnedCount.Store(count)
+}
+
 func (m *Manager) updateState() {
 	history := m.GetHistory()
+	if len(history) > stateHeadLimit {
+		history = history[:stateHeadLimit]
+	}
 
 	var current *Entry
 	if len(history) > 0 {
@@ -830,17 +896,35 @@ func (m *Manager) deleteStaleEntries(ids []uint64) {
 		return
 	}
 
-	if err := m.dbUpdate(func(tx *bolt.Tx) error {
+	if err := m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
+			return false, 0, nil
 		}
+		delta := 0
+		removed := false
 		for _, id := range ids {
-			if err := b.Delete(itob(id)); err != nil {
+			key := itob(id)
+			v := b.Get(key)
+			if v == nil {
+				continue
+			}
+			pinned := false
+			if h, ok := parseEntryHeader(v); ok {
+				pinned = h.pinned
+			} else if e, err := decodeEntryMeta(v); err == nil {
+				pinned = e.Pinned
+			}
+			if err := b.Delete(key); err != nil {
 				log.Errorf("Failed to delete stale entry %d: %v", id, err)
+				continue
+			}
+			removed = true
+			if !pinned {
+				delta--
 			}
 		}
-		return nil
+		return removed, delta, nil
 	}); err != nil {
 		log.Errorf("Failed to delete stale entries: %v", err)
 	}
@@ -884,24 +968,29 @@ func (m *Manager) GetEntry(id uint64) (*Entry, error) {
 }
 
 func (m *Manager) DeleteEntry(id uint64) error {
-	if m.db == nil {
-		return fmt.Errorf("database not available")
-	}
-
-	err := m.dbUpdate(func(tx *bolt.Tx) error {
+	return m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
+			return false, 0, nil
 		}
-		return b.Delete(itob(id))
+		key := itob(id)
+		v := b.Get(key)
+		if v == nil {
+			return false, 0, nil
+		}
+		delta := -1
+		if h, ok := parseEntryHeader(v); ok {
+			if h.pinned {
+				delta = 0
+			}
+		} else if e, err := decodeEntryMeta(v); err == nil && e.Pinned {
+			delta = 0
+		}
+		if err := b.Delete(key); err != nil {
+			return false, 0, err
+		}
+		return true, delta, nil
 	})
-
-	if err == nil {
-		m.updateState()
-		m.notifySubscribers()
-	}
-
-	return err
 }
 
 // DeleteEntries removes several entries in one transaction and reports how many
@@ -916,10 +1005,10 @@ func (m *Manager) DeleteEntries(ids []uint64) (int, error) {
 	}
 
 	deleted := 0
-	err := m.dbUpdate(func(tx *bolt.Tx) error {
+	err := m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
+			return false, 0, nil
 		}
 		for _, id := range ids {
 			key := itob(id)
@@ -927,24 +1016,24 @@ func (m *Manager) DeleteEntries(ids []uint64) (int, error) {
 			if v == nil {
 				continue
 			}
-			if entry, err := decodeEntryMeta(v); err == nil && entry.Pinned {
+			pinned := false
+			if h, ok := parseEntryHeader(v); ok {
+				pinned = h.pinned
+			} else if entry, err := decodeEntryMeta(v); err == nil {
+				pinned = entry.Pinned
+			}
+			if pinned {
 				continue
 			}
 			if err := b.Delete(key); err != nil {
-				return err
+				return false, 0, err
 			}
 			deleted++
 		}
-		return nil
+		return deleted > 0, -deleted, nil
 	})
-
 	if err != nil {
 		return 0, err
-	}
-
-	if deleted > 0 {
-		m.updateState()
-		m.notifySubscribers()
 	}
 
 	return deleted, nil
@@ -962,14 +1051,7 @@ func (m *Manager) TouchEntry(id uint64) error {
 
 	entry.Timestamp = time.Now()
 
-	if err := m.storeEntry(*entry); err != nil {
-		return err
-	}
-
-	m.updateState()
-	m.notifySubscribers()
-
-	return nil
+	return m.storeEntry(*entry)
 }
 
 func (m *Manager) CreateHistoryEntryFromPinned(pinnedEntry *Entry) error {
@@ -994,9 +1076,6 @@ func (m *Manager) CreateHistoryEntryFromPinned(pinnedEntry *Entry) error {
 		return err
 	}
 
-	m.updateState()
-	m.notifySubscribers()
-
 	return nil
 }
 
@@ -1006,10 +1085,11 @@ func (m *Manager) ClearHistory() {
 	}
 
 	// Delete only non-pinned entries
-	if err := m.dbUpdate(func(tx *bolt.Tx) error {
+	var pinnedLeft int
+	if err := m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
+			return false, 0, nil
 		}
 
 		var toDelete [][]byte
@@ -1017,9 +1097,11 @@ func (m *Manager) ClearHistory() {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			if h, ok := parseEntryHeader(v); ok {
 				if h.pinned {
+					pinnedLeft++
 					continue
 				}
 			} else if entry, err := decodeEntryMeta(v); err == nil && entry.Pinned {
+				pinnedLeft++
 				continue
 			}
 			toDelete = append(toDelete, append([]byte(nil), k...))
@@ -1027,40 +1109,20 @@ func (m *Manager) ClearHistory() {
 
 		for _, k := range toDelete {
 			if err := b.Delete(k); err != nil {
-				return err
+				return false, 0, err
 			}
 		}
-		return nil
+		return len(toDelete) > 0, -len(toDelete), nil
 	}); err != nil {
 		log.Errorf("Failed to clear clipboard history: %v", err)
 		return
 	}
 
-	pinnedCount := 0
-	if err := m.dbView(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("clipboard"))
-		if b != nil {
-			c := b.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				entry, _ := decodeEntryMeta(v)
-				if entry.Pinned {
-					pinnedCount++
-				}
-			}
-		}
-		return nil
-	}); err != nil {
-		log.Errorf("Failed to count pinned entries: %v", err)
-	}
-
-	if pinnedCount == 0 {
+	if pinnedLeft == 0 {
 		if err := m.compactDB(); err != nil {
 			log.Errorf("Failed to compact database: %v", err)
 		}
 	}
-
-	m.updateState()
-	m.notifySubscribers()
 }
 
 func (m *Manager) compactDB() error {
@@ -1314,10 +1376,10 @@ func (m *Manager) clearHistoryInternal() error {
 func (m *Manager) clearOldEntries(days int) error {
 	cutoff := time.Now().AddDate(0, 0, -days)
 
-	return m.dbUpdate(func(tx *bolt.Tx) error {
+	return m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
+			return false, 0, nil
 		}
 
 		var toDelete [][]byte
@@ -1339,10 +1401,10 @@ func (m *Manager) clearOldEntries(days int) error {
 
 		for _, k := range toDelete {
 			if err := b.Delete(k); err != nil {
-				return err
+				return false, 0, err
 			}
 		}
-		return nil
+		return len(toDelete) > 0, -len(toDelete), nil
 	})
 }
 
@@ -1612,169 +1674,138 @@ func (m *Manager) StoreData(data []byte, mimeType string) error {
 		return err
 	}
 
-	m.updateState()
-	m.notifySubscribers()
-
 	return nil
 }
 
 func (m *Manager) PinEntry(id uint64) error {
-	if m.db == nil {
-		return fmt.Errorf("database not available")
-	}
-
-	entryToPin, err := m.GetEntry(id)
-	if err != nil {
-		return err
-	}
-
-	var hashExists bool
-	if err := m.dbView(func(tx *bolt.Tx) error {
+	return m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			entry, err := decodeEntryMeta(v)
-			if err != nil || !entry.Pinned {
-				continue
-			}
-			if entry.Hash == entryToPin.Hash {
-				hashExists = true
-				return nil
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	if hashExists {
-		return nil
-	}
-
-	cfg := m.getConfig()
-	pinnedCount := 0
-	if err := m.dbView(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("clipboard"))
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			entry, err := decodeEntryMeta(v)
-			if err == nil && entry.Pinned {
-				pinnedCount++
-			}
-		}
-		return nil
-	}); err != nil {
-		log.Errorf("Failed to count pinned entries: %v", err)
-	}
-
-	if pinnedCount >= cfg.MaxPinned {
-		return fmt.Errorf("maximum pinned entries reached (%d)", cfg.MaxPinned)
-	}
-
-	err = m.dbUpdate(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("clipboard"))
-		if b == nil {
-			return fmt.Errorf("entry not found")
+			return false, 0, fmt.Errorf("entry not found")
 		}
 		v := b.Get(itob(id))
 		if v == nil {
-			return fmt.Errorf("entry not found")
+			return false, 0, fmt.Errorf("entry not found")
 		}
 
 		entry, err := decodeEntry(v)
 		if err != nil {
-			return err
+			return false, 0, err
+		}
+		if entry.Pinned {
+			return false, 0, nil
+		}
+
+		cfg := m.getConfig()
+		var pinnedCount int
+		hashExists := false
+		c := b.Cursor()
+		for _, v := c.First(); v != nil; _, v = c.Next() {
+			if h, ok := parseEntryHeader(v); ok {
+				if !h.pinned {
+					continue
+				}
+				pinnedCount++
+				if h.hash == entry.Hash {
+					hashExists = true
+				}
+				continue
+			}
+			if e, err := decodeEntryMeta(v); err == nil && e.Pinned {
+				pinnedCount++
+				if e.Hash == entry.Hash {
+					hashExists = true
+				}
+			}
+		}
+
+		if hashExists {
+			return false, 0, nil
+		}
+
+		if pinnedCount >= cfg.MaxPinned {
+			return false, 0, fmt.Errorf("maximum pinned entries reached (%d)", cfg.MaxPinned)
 		}
 
 		entry.Pinned = true
 		encoded, err := encodeEntry(entry)
 		if err != nil {
-			return err
+			return false, 0, err
 		}
 
-		return b.Put(itob(id), encoded)
+		if err := b.Put(itob(id), encoded); err != nil {
+			return false, 0, err
+		}
+		return true, -1, nil
 	})
-
-	if err == nil {
-		m.updateState()
-		m.notifySubscribers()
-	}
-
-	return err
 }
 
 func (m *Manager) UnpinEntry(id uint64) error {
-	if m.db == nil {
-		return fmt.Errorf("database not available")
-	}
-
-	err := m.dbUpdate(func(tx *bolt.Tx) error {
+	return m.withMutation(func(tx *bolt.Tx) (bool, int, error) {
 		b := tx.Bucket([]byte("clipboard"))
 		if b == nil {
-			return fmt.Errorf("entry not found")
+			return false, 0, fmt.Errorf("entry not found")
 		}
 		v := b.Get(itob(id))
 		if v == nil {
-			return fmt.Errorf("entry not found")
+			return false, 0, fmt.Errorf("entry not found")
 		}
 
 		entry, err := decodeEntry(v)
 		if err != nil {
-			return err
+			return false, 0, err
+		}
+		if !entry.Pinned {
+			return false, 0, nil
 		}
 
-		if entry.Pinned {
-			currentKey := itob(id)
-			var keepKey []byte
-			var deleteKeys [][]byte
+		currentKey := itob(id)
+		var keepKey []byte
+		var deleteKeys [][]byte
 
-			c := b.Cursor()
-			for k, v := c.Last(); k != nil; k, v = c.Prev() {
-				if bytes.Equal(k, currentKey) || extractHash(v) != entry.Hash {
+		c := b.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			if bytes.Equal(k, currentKey) {
+				continue
+			}
+			if h, ok := parseEntryHeader(v); ok {
+				if h.hash != entry.Hash || h.pinned {
 					continue
 				}
-				duplicate, err := decodeEntryMeta(v)
-				if err == nil && !duplicate.Pinned {
-					key := append([]byte(nil), k...)
-					if keepKey == nil {
-						keepKey = key
-					} else {
-						deleteKeys = append(deleteKeys, key)
-					}
-				}
+			} else if duplicate, err := decodeEntryMeta(v); err != nil || duplicate.Pinned || duplicate.Hash != entry.Hash {
+				continue
 			}
+			key := append([]byte(nil), k...)
+			if keepKey == nil {
+				keepKey = key
+			} else {
+				deleteKeys = append(deleteKeys, key)
+			}
+		}
 
-			if keepKey != nil {
-				for _, key := range deleteKeys {
-					if err := b.Delete(key); err != nil {
-						return err
-					}
+		if keepKey != nil {
+			for _, key := range deleteKeys {
+				if err := b.Delete(key); err != nil {
+					return false, 0, err
 				}
-				return b.Delete(currentKey)
 			}
+			if err := b.Delete(currentKey); err != nil {
+				return false, 0, err
+			}
+			return true, -len(deleteKeys), nil
 		}
 
 		entry.Pinned = false
 		encoded, err := encodeEntry(entry)
 		if err != nil {
-			return err
+			return false, 0, err
 		}
 
-		return b.Put(itob(id), encoded)
+		if err := b.Put(currentKey, encoded); err != nil {
+			return false, 0, err
+		}
+		return true, 1, nil
 	})
-
-	if err == nil {
-		m.updateState()
-		m.notifySubscribers()
-	}
-
-	return err
 }
 
 func (m *Manager) GetPinnedEntries() []Entry {
@@ -1881,9 +1912,6 @@ func (m *Manager) CopyFile(filePath string) error {
 			log.Errorf("Failed to store file entry: %v", err)
 		}
 	}
-
-	m.updateState()
-	m.notifySubscribers()
 
 	offers := []wlclipboard.Offer{
 		{MimeType: "x-special/gnome-copied-files", Data: []byte("copy\n" + fileURI)},
