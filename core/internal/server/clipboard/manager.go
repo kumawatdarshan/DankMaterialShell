@@ -2,7 +2,6 @@ package clipboard
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -18,8 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"hash/fnv"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/godbus/dbus/v5"
@@ -526,7 +523,7 @@ func (m *Manager) storeEntry(entry Entry) error {
 			return fmt.Errorf("clipboard bucket missing")
 		}
 
-		if err := m.deduplicateInTx(b, entry.Hash); err != nil {
+		if _, err := dedupByHash(b, entry.Hash); err != nil {
 			return err
 		}
 
@@ -546,194 +543,9 @@ func (m *Manager) storeEntry(entry Entry) error {
 			return err
 		}
 
-		return m.trimLengthInTx(b)
+		_, err = trimUnpinned(b, m.config.MaxHistory)
+		return err
 	})
-}
-
-func (m *Manager) deduplicateInTx(b *bolt.Bucket, hash uint64) error {
-	c := b.Cursor()
-	for k, v := c.Last(); k != nil; k, v = c.Prev() {
-		if extractHash(v) != hash {
-			continue
-		}
-		entry, err := decodeEntryMeta(v)
-		if err == nil && entry.Pinned {
-			continue
-		}
-		if err := b.Delete(k); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *Manager) trimLengthInTx(b *bolt.Bucket) error {
-	if m.config.MaxHistory < 0 {
-		return nil
-	}
-	c := b.Cursor()
-	var count int
-	for k, v := c.Last(); k != nil; k, v = c.Prev() {
-		entry, err := decodeEntryMeta(v)
-		if err == nil && entry.Pinned {
-			continue
-		}
-		if count < m.config.MaxHistory {
-			count++
-			continue
-		}
-		if err := b.Delete(k); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func encodeEntry(e Entry) ([]byte, error) {
-	buf := new(bytes.Buffer)
-
-	binary.Write(buf, binary.BigEndian, e.ID)
-	binary.Write(buf, binary.BigEndian, uint32(len(e.Data)))
-	buf.Write(e.Data)
-	binary.Write(buf, binary.BigEndian, uint32(len(e.MimeType)))
-	buf.WriteString(e.MimeType)
-	binary.Write(buf, binary.BigEndian, uint32(len(e.Preview)))
-	buf.WriteString(e.Preview)
-	binary.Write(buf, binary.BigEndian, int32(e.Size))
-	binary.Write(buf, binary.BigEndian, e.Timestamp.Unix())
-	if e.IsImage {
-		buf.WriteByte(1)
-	} else {
-		buf.WriteByte(0)
-	}
-	binary.Write(buf, binary.BigEndian, e.Hash)
-	if e.Pinned {
-		buf.WriteByte(1)
-	} else {
-		buf.WriteByte(0)
-	}
-	if e.AltMimeType != "" {
-		binary.Write(buf, binary.BigEndian, uint32(len(e.AltMimeType)))
-		buf.WriteString(e.AltMimeType)
-		binary.Write(buf, binary.BigEndian, uint32(len(e.AltData)))
-		buf.Write(e.AltData)
-	}
-
-	return buf.Bytes(), nil
-}
-
-func decodeEntry(data []byte) (Entry, error) {
-	return decodeEntryFields(data, true)
-}
-
-func decodeEntryMeta(data []byte) (Entry, error) {
-	return decodeEntryFields(data, false)
-}
-
-func decodeEntryFields(data []byte, withData bool) (Entry, error) {
-	buf := bytes.NewReader(data)
-	var e Entry
-
-	binary.Read(buf, binary.BigEndian, &e.ID)
-
-	var dataLen uint32
-	binary.Read(buf, binary.BigEndian, &dataLen)
-	switch {
-	case withData:
-		e.Data = make([]byte, dataLen)
-		buf.Read(e.Data)
-	default:
-		if _, err := buf.Seek(int64(dataLen), io.SeekCurrent); err != nil {
-			return e, err
-		}
-	}
-
-	var mimeLen uint32
-	binary.Read(buf, binary.BigEndian, &mimeLen)
-	mimeBytes := make([]byte, mimeLen)
-	buf.Read(mimeBytes)
-	e.MimeType = string(mimeBytes)
-
-	var prevLen uint32
-	binary.Read(buf, binary.BigEndian, &prevLen)
-	prevBytes := make([]byte, prevLen)
-	buf.Read(prevBytes)
-	e.Preview = string(prevBytes)
-
-	var size int32
-	binary.Read(buf, binary.BigEndian, &size)
-	e.Size = int(size)
-
-	var timestamp int64
-	binary.Read(buf, binary.BigEndian, &timestamp)
-	e.Timestamp = time.Unix(timestamp, 0)
-
-	var isImage byte
-	binary.Read(buf, binary.BigEndian, &isImage)
-	e.IsImage = isImage == 1
-
-	if buf.Len() >= 8 {
-		binary.Read(buf, binary.BigEndian, &e.Hash)
-	}
-
-	if buf.Len() >= 1 {
-		var pinnedByte byte
-		binary.Read(buf, binary.BigEndian, &pinnedByte)
-		e.Pinned = pinnedByte == 1
-	}
-
-	if buf.Len() >= 4 {
-		var altMimeLen uint32
-		binary.Read(buf, binary.BigEndian, &altMimeLen)
-		altMimeBytes := make([]byte, altMimeLen)
-		buf.Read(altMimeBytes)
-		e.AltMimeType = string(altMimeBytes)
-
-		var altDataLen uint32
-		binary.Read(buf, binary.BigEndian, &altDataLen)
-		if withData {
-			e.AltData = make([]byte, altDataLen)
-			buf.Read(e.AltData)
-		}
-	}
-
-	return e, nil
-}
-
-func itob(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
-}
-
-func computeHash(data []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(data)
-	return h.Sum64()
-}
-
-func extractHash(data []byte) uint64 {
-	buf := bytes.NewReader(data)
-	if _, err := buf.Seek(8, io.SeekStart); err != nil {
-		return 0
-	}
-	for range 3 { // data, mime type, preview
-		var length uint32
-		if binary.Read(buf, binary.BigEndian, &length) != nil {
-			return 0
-		}
-		if _, err := buf.Seek(int64(length), io.SeekCurrent); err != nil {
-			return 0
-		}
-	}
-	if _, err := buf.Seek(4+8+1, io.SeekCurrent); err != nil { // size, timestamp, isImage
-		return 0
-	}
-	var hash uint64
-	if binary.Read(buf, binary.BigEndian, &hash) != nil {
-		return 0
-	}
-	return hash
 }
 
 func (m *Manager) hasSensitiveMimeType(mimes []string) bool {
@@ -805,7 +617,9 @@ func (m *Manager) textPreview(data []byte) string {
 	text = strings.Join(strings.Fields(text), " ")
 
 	if len(text) > 100 {
-		return text[:100] + "…"
+		if r := []rune(text); len(r) > 100 {
+			return string(r[:100]) + "…"
+		}
 	}
 	return text
 }
@@ -821,9 +635,6 @@ func (m *Manager) imagePreview(data []byte, format string) string {
 func (m *Manager) uriListPreview(data []byte) (string, bool) {
 	text := strings.TrimSpace(string(data))
 	uris := strings.Split(text, "\r\n")
-	if len(uris) == 0 {
-		uris = strings.Split(text, "\n")
-	}
 
 	if len(uris) > 1 {
 		return fmt.Sprintf("[[ %d files ]]", len(uris)), false
@@ -853,9 +664,6 @@ func (m *Manager) uriListPreview(data []byte) (string, bool) {
 func (m *Manager) tryReadImageFromURI(data []byte) ([]byte, string, bool) {
 	text := strings.TrimSpace(string(data))
 	uris := strings.Split(text, "\r\n")
-	if len(uris) == 0 {
-		uris = strings.Split(text, "\n")
-	}
 
 	if len(uris) != 1 || !strings.HasPrefix(uris[0], "file://") {
 		return nil, "", false
@@ -1207,10 +1015,14 @@ func (m *Manager) ClearHistory() {
 		var toDelete [][]byte
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			entry, err := decodeEntryMeta(v)
-			if err != nil || !entry.Pinned {
-				toDelete = append(toDelete, k)
+			if h, ok := parseEntryHeader(v); ok {
+				if h.pinned {
+					continue
+				}
+			} else if entry, err := decodeEntryMeta(v); err == nil && entry.Pinned {
+				continue
 			}
+			toDelete = append(toDelete, append([]byte(nil), k...))
 		}
 
 		for _, k := range toDelete {
@@ -1509,18 +1321,20 @@ func (m *Manager) clearOldEntries(days int) error {
 		}
 
 		var toDelete [][]byte
+		cutoffUnix := cutoff.Unix()
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			entry, err := decodeEntryMeta(v)
-			if err != nil {
-				continue
+			if h, ok := parseEntryHeader(v); ok {
+				if h.pinned || h.ts > cutoffUnix {
+					continue
+				}
+			} else {
+				entry, err := decodeEntryMeta(v)
+				if err != nil || entry.Pinned || !entry.Timestamp.Before(cutoff) {
+					continue
+				}
 			}
-			if entry.Pinned {
-				continue
-			}
-			if entry.Timestamp.Before(cutoff) {
-				toDelete = append(toDelete, k)
-			}
+			toDelete = append(toDelete, append([]byte(nil), k...))
 		}
 
 		for _, k := range toDelete {

@@ -157,11 +157,15 @@ func GetDBPath() (string, error) {
 }
 
 func deduplicateInTx(b *bolt.Bucket, hash uint64) error {
+	var keys [][]byte
 	c := b.Cursor()
 	for k, v := c.Last(); k != nil; k, v = c.Prev() {
 		if extractHash(v) != hash {
 			continue
 		}
+		keys = append(keys, append([]byte(nil), k...))
+	}
+	for _, k := range keys {
 		if err := b.Delete(k); err != nil {
 			return err
 		}
@@ -170,6 +174,7 @@ func deduplicateInTx(b *bolt.Bucket, hash uint64) error {
 }
 
 func trimLengthInTx(b *bolt.Bucket, maxHistory int) error {
+	var keys [][]byte
 	c := b.Cursor()
 	var count int
 	for k, _ := c.Last(); k != nil; k, _ = c.Prev() {
@@ -177,6 +182,9 @@ func trimLengthInTx(b *bolt.Bucket, maxHistory int) error {
 			count++
 			continue
 		}
+		keys = append(keys, append([]byte(nil), k...))
+	}
+	for _, k := range keys {
 		if err := b.Delete(k); err != nil {
 			return err
 		}
