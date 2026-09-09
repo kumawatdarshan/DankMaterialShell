@@ -27,6 +27,8 @@ DankModal {
     property bool targetCopied: false
     property var mimeMatchedAppIds: []
     property var mimeMatchedRawIds: []
+    property var _pickerIndex: null
+    property int _pickerCacheVersion: -1
 
     signal applicationSelected(var app, string targetData)
 
@@ -92,23 +94,39 @@ DankModal {
         return !!list && !!list.includes && list.includes(mime);
     }
 
+    function pickerIndex() {
+        if (_pickerIndex !== null && _pickerCacheVersion === AppSearchService.cacheVersion) {
+            return _pickerIndex;
+        }
+        _pickerIndex = AppSearchService.getVisibleApplications().map(app => ({
+            app: app,
+            appId: _normAppId(app.id || app.execString || app.exec || ""),
+            name: app.name || "",
+            nameLower: (app.name || "").toLowerCase()
+        }));
+        _pickerCacheVersion = AppSearchService.cacheVersion;
+        return _pickerIndex;
+    }
+
     function updateApplicationList() {
         applicationsModel.clear();
-        const apps = AppSearchService.applications;
+        const index = pickerIndex();
         const usageHistory = usageHistoryKey && CacheData[usageHistoryKey] ? CacheData[usageHistoryKey] : {};
         const hasCategoryFilter = categoryFilter.length > 0;
+        const categorySet = new Set(categoryFilter);
         const hasMime = mimeType.length > 0;
-        const hasMimeMatches = mimeMatchedAppIds.length > 0;
+        const mimeMatchedIds = new Set(mimeMatchedAppIds);
+        const hasMimeMatches = mimeMatchedIds.size > 0;
         const lowerQuery = searchQuery.toLowerCase();
         let filteredApps = [];
         const listedIds = new Set();
 
-        for (const app of apps) {
+        for (const entry of index) {
+            const app = entry.app;
             if (!app)
                 continue;
-            const appId = _normAppId(app.id || app.execString || app.exec || "");
-            listedIds.add(appId);
-            const mimeIdMatch = hasMimeMatches && mimeMatchedAppIds.includes(appId);
+            listedIds.add(entry.appId);
+            const mimeIdMatch = hasMimeMatches && mimeMatchedIds.has(entry.appId);
             const mimeFieldMatch = hasMime && _appMatchesMime(app, mimeType);
             const mimeMatch = mimeIdMatch || mimeFieldMatch;
 
@@ -116,13 +134,13 @@ DankModal {
             if (hasCategoryFilter && app.categories) {
                 try {
                     for (const cat of app.categories) {
-                        if (categoryFilter.includes(cat)) {
+                        if (categorySet.has(cat)) {
                             categoryMatch = true;
                             break;
                         }
                     }
                 } catch (e) {
-                    log.warn("AppPicker: Error iterating categories for", app.name, ":", e);
+                    log.warn("AppPicker: Error iterating categories for", entry.name, ":", e);
                     continue;
                 }
             }
@@ -131,17 +149,19 @@ DankModal {
             if (!include)
                 continue;
 
-            const name = app.name || "";
-            if (searchQuery !== "" && !name.toLowerCase().includes(lowerQuery))
+            if (searchQuery !== "" && !entry.nameLower.includes(lowerQuery))
                 continue;
 
+            const usageId = app.id || app.execString || app.exec || "";
             filteredApps.push({
-                name: name,
+                name: entry.name,
+                nameLower: entry.nameLower,
                 icon: app.icon || "application-x-executable",
                 exec: app.exec || app.execString || "",
                 startupClass: app.startupWMClass || "",
                 appData: app,
-                mimeMatch: mimeMatch
+                mimeMatch: mimeMatch,
+                usage: usageHistory[usageId] ? usageHistory[usageId].count : 0
             });
         }
 
@@ -151,19 +171,23 @@ DankModal {
             const normId = _normAppId(rawId);
             if (normId === "dms-open" || listedIds.has(normId))
                 continue;
-            const entry = DesktopEntries.byId(rawId) || DesktopEntries.heuristicLookup(rawId);
-            if (!entry)
+            const rawEntry = DesktopEntries.byId(rawId) || DesktopEntries.heuristicLookup(rawId);
+            if (!rawEntry || AppSearchService.isAppHidden(rawEntry))
                 continue;
+            const entry = AppSearchService.applyAppOverride(rawEntry);
             const name = entry.name || "";
             if (searchQuery !== "" && !name.toLowerCase().includes(lowerQuery))
                 continue;
+            const usageId = entry.id || entry.execString || entry.exec || "";
             filteredApps.push({
                 name: name,
+                nameLower: name.toLowerCase(),
                 icon: entry.icon || "application-x-executable",
                 exec: entry.execString || "",
                 startupClass: entry.startupClass || "",
                 appData: entry,
-                mimeMatch: true
+                mimeMatch: true,
+                usage: usageHistory[usageId] ? usageHistory[usageId].count : 0
             });
         }
 
@@ -171,14 +195,16 @@ DankModal {
             if (a.mimeMatch !== b.mimeMatch) {
                 return a.mimeMatch ? -1 : 1;
             }
-            const aId = a.appData.id || a.appData.execString || a.appData.exec || "";
-            const bId = b.appData.id || b.appData.execString || b.appData.exec || "";
-            const aUsage = usageHistory[aId] ? usageHistory[aId].count : 0;
-            const bUsage = usageHistory[bId] ? usageHistory[bId].count : 0;
-            if (aUsage !== bUsage) {
-                return bUsage - aUsage;
+            if (a.usage !== b.usage) {
+                return b.usage - a.usage;
             }
-            return (a.name || "").localeCompare(b.name || "");
+            if (a.nameLower < b.nameLower) {
+                return -1;
+            }
+            if (a.nameLower > b.nameLower) {
+                return 1;
+            }
+            return 0;
         });
 
         filteredApps.forEach(app => {

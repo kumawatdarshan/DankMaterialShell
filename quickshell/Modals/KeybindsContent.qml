@@ -117,29 +117,50 @@ FocusScope {
             clip: true
 
             property var rawBinds: KeybindsService.cheatsheet.binds || {}
+            property var _bindIndex: null
+            property var _bindIndexSource: null
+
+            function bindIndex() {
+                const source = rawBinds;
+                if (_bindIndex !== null && _bindIndexSource === source)
+                    return _bindIndex;
+                const index = {};
+                for (const cat in source) {
+                    const list = Array.isArray(source[cat]) ? source[cat] : [];
+                    index[cat] = {
+                        catLower: cat.toLowerCase(),
+                        binds: list.map(bind => ({
+                            bind: bind,
+                            keyLower: (bind.key || "").toLowerCase(),
+                            descLower: (bind.desc || "").toLowerCase(),
+                            actionLower: (bind.action || "").toLowerCase()
+                        }))
+                    };
+                }
+                _bindIndex = index;
+                _bindIndexSource = source;
+                return index;
+            }
 
             function generateCategories(query) {
                 const lowerQuery = query ? query.toLowerCase().trim() : "";
-                const lowerQueryWords = query.split(/\s+/);
+                const lowerQueryWords = lowerQuery.split(/\s+/);
                 const processed = {};
+                const index = bindIndex();
 
-                for (const cat in rawBinds) {
-                    const binds = rawBinds[cat];
-                    const catLower = cat.toLowerCase();
+                for (const cat in index) {
+                    const entry = index[cat];
                     const subcats = {};
                     let hasSubcats = false;
-                    for (let i = 0; i < binds.length; i++) {
-                        const bind = binds[i];
-                        const keyLower = (bind.key || "").toLowerCase();
-                        const descLower = (bind.desc || "").toLowerCase();
-                        const actionLower = (bind.action || "").toLowerCase();
-
+                    for (let i = 0; i < entry.binds.length; i++) {
+                        const item = entry.binds[i];
+                        const bind = item.bind;
                         if (bind.hideOnOverlay)
                             continue;
                         let shouldContinue = false;
                         for (let j = 0; j < lowerQueryWords.length; j++) {
                             const word = lowerQueryWords[j];
-                            if (!(word.length === 0 || keyLower.includes(word) || descLower.includes(word) || catLower.includes(word) || actionLower.includes(word))) {
+                            if (!(word.length === 0 || item.keyLower.includes(word) || item.descLower.includes(word) || entry.catLower.includes(word) || item.actionLower.includes(word))) {
                                 shouldContinue = true;
                                 break;
                             }
